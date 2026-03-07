@@ -5,17 +5,17 @@
 #property strict
 #property copyright "Copyright 2026, Gemini Quant Lab"
 #property link      ""
-#property version   "6.00"
+#property version   "7.00"
 #property description "Gold Quant M5 Scalper - Mean Reversion Z-Score EA"
 
 //--- Inputs: Strategy
 input string   TradeSymbol    = "GOLD";
-input double   InpEntryZ      = 2.0;      // Z-Score entry threshold (1.8–2.5)
+input double   InpEntryZ      = 2.5;      // Z-Score entry threshold (2.3–2.7 sweet spot)
 input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
 input double   InpATRStop     = 2.0;      // ATR multiplier for SL (1.5–2.5)
-input int      InpStartHour   = 10;       // Trade window start hour
-input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
+input int      InpStartHour   = 9;        // Trade window start hour (London open)
+input int      InpEndHour     = 18;       // Trade window end hour, exclusive (avoid late NY chop)
 input int      InpMagic       = 777333;   // Magic number
 
 //--- Inputs: Partial Profit & Trailing
@@ -31,6 +31,12 @@ input double   InpTrailSellATR   = 0.0;   // Sell trail override (0 = use standa
 input int      InpMAPeriod    = 20;       // MA / StdDev period
 input int      InpATRPeriod   = 14;       // ATR period
 input int      InpADXPeriod   = 14;       // ADX period
+input int      InpRSIPeriod   = 14;       // RSI period
+
+//--- Inputs: RSI Confirmation
+input bool     InpUseRSIFilter   = true;  // Enable RSI confirmation filter
+input double   InpRSIOversold    = 30.0;  // RSI below this = oversold (allow BUY)
+input double   InpRSIOverbought  = 70.0;  // RSI above this = overbought (allow SELL)
 
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
@@ -54,11 +60,11 @@ input double   InpMaxEquityDDPct     = 15.0;  // Max drawdown % from peak equity
 
 //--- Inputs: Volatility Filter
 input bool     InpUseVolFilter    = true;  // Enable volatility-adjusted entry
-input double   InpATRMaxMultiple  = 2.0;   // Max ATR vs 50-period avg (skip if exceeded)
+input double   InpATRMaxMultiple  = 1.7;   // Max ATR vs 50-period avg (skip near-breakouts)
 input double   InpATRMinMultiple  = 0.5;   // Min ATR vs 50-period avg (skip if too quiet)
 
 //--- Global Handles & State
-int handleMA, handleSD, handleATR, handleADX, handleATR50;
+int handleMA, handleSD, handleATR, handleADX, handleATR50, handleRSI;
 
 //--- Partial close tags (embedded in trade comment)
 string tagTP1 = "_T1";
@@ -99,10 +105,11 @@ int OnInit() {
    handleATR   = iATR(TradeSymbol, _Period, InpATRPeriod);
    handleADX   = iADX(TradeSymbol, _Period, InpADXPeriod);
    handleATR50 = iATR(TradeSymbol, _Period, 50);
+   handleRSI   = iRSI(TradeSymbol, _Period, InpRSIPeriod, PRICE_CLOSE);
 
    if(handleMA == INVALID_HANDLE || handleSD == INVALID_HANDLE ||
       handleATR == INVALID_HANDLE || handleADX == INVALID_HANDLE ||
-      handleATR50 == INVALID_HANDLE) {
+      handleATR50 == INVALID_HANDLE || handleRSI == INVALID_HANDLE) {
       Print("Failed to create indicator handles");
       return(INIT_FAILED);
    }
@@ -134,6 +141,7 @@ void OnDeinit(const int reason) {
    if(handleATR   != INVALID_HANDLE) IndicatorRelease(handleATR);
    if(handleADX   != INVALID_HANDLE) IndicatorRelease(handleADX);
    if(handleATR50 != INVALID_HANDLE) IndicatorRelease(handleATR50);
+   if(handleRSI   != INVALID_HANDLE) IndicatorRelease(handleRSI);
 }
 
 //+------------------------------------------------------------------+
@@ -550,9 +558,10 @@ void ManagePosition(double atrVal) {
 void OnTick() {
    CheckProtectionResets();
 
-   double ma[1], sd[1], atr[1], adx[1];
+   double ma[1], sd[1], atr[1], adx[1], rsi[1];
    if(CopyBuffer(handleMA,0,0,1,ma)<1 || CopyBuffer(handleSD,0,0,1,sd)<1 ||
-      CopyBuffer(handleATR,0,0,1,atr)<1 || CopyBuffer(handleADX,0,0,1,adx)<1) return;
+      CopyBuffer(handleATR,0,0,1,atr)<1 || CopyBuffer(handleADX,0,0,1,adx)<1 ||
+      CopyBuffer(handleRSI,0,0,1,rsi)<1) return;
 
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
    double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
@@ -567,7 +576,7 @@ void OnTick() {
    // --- EQUITY DRAWDOWN GLOBAL STOP (requires manual review) ---
    if(IsEquityStopHit()) {
       if(SelectOwnPosition()) CloseAllOwnPositions("equity drawdown stop");
-      Comment("--- GOLD QUANT M5 SCALPER v6 ---\n",
+      Comment("--- GOLD QUANT M5 SCALPER v7 ---\n",
               "EQUITY DRAWDOWN STOP - EA HALTED\n",
               "Peak: ", DoubleToString(peakEquity, 2), "\n",
               "Drawdown: ", DoubleToString(((peakEquity - AccountInfoDouble(ACCOUNT_EQUITY)) / peakEquity) * 100.0, 2), "%\n",
@@ -578,7 +587,7 @@ void OnTick() {
    // --- WEEKLY LOSS: close everything and stop until next week ---
    if(IsWeeklyLossLimitHit()) {
       if(SelectOwnPosition()) CloseAllOwnPositions("weekly loss limit");
-      Comment("--- GOLD QUANT M5 SCALPER v6 ---\n",
+      Comment("--- GOLD QUANT M5 SCALPER v7 ---\n",
               "WEEKLY LOSS LIMIT REACHED - TRADING PAUSED\n",
               GetProtectionStatus());
       return;
@@ -587,7 +596,7 @@ void OnTick() {
    // --- DAILY LOSS: close everything and stop for today ---
    if(IsDailyLossLimitHit()) {
       if(SelectOwnPosition()) CloseAllOwnPositions("daily loss limit");
-      Comment("--- GOLD QUANT M5 SCALPER v6 ---\n",
+      Comment("--- GOLD QUANT M5 SCALPER v7 ---\n",
               "DAILY LOSS LIMIT REACHED - TRADING STOPPED\n",
               GetProtectionStatus());
       return;
@@ -609,9 +618,13 @@ void OnTick() {
       bool spreadOk  = (spreadPts <= InpMaxSpreadPts);
       bool volOk     = IsVolatilityOk(atr[0]);
 
+      // RSI confirmation: buy only if oversold, sell only if overbought
+      bool rsiBuyOk  = (!InpUseRSIFilter || rsi[0] < InpRSIOversold);
+      bool rsiSellOk = (!InpUseRSIFilter || rsi[0] > InpRSIOverbought);
+
       if(inWindow && isRanging && spreadOk && volOk && !nearNews && MathAbs(zScore) > InpEntryZ) {
-         if(zScore < 0) ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0]);
-         else           ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0]);
+         if(zScore < 0 && rsiBuyOk)       ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0]);
+         else if(zScore > 0 && rsiSellOk) ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0]);
       }
    }
 
@@ -624,8 +637,9 @@ void OnTick() {
       else                    exitStage = "Full position (waiting TP1)";
    }
 
-   Comment("--- GOLD QUANT M5 SCALPER v6 ---\n",
-           "Z-Score: ", DoubleToString(zScore, 2), "\n",
+   Comment("--- GOLD QUANT M5 SCALPER v7 ---\n",
+           "Z-Score: ", DoubleToString(zScore, 2),
+           " | RSI: ", DoubleToString(rsi[0], 1), "\n",
            "ADX: ", DoubleToString(adx[0], 1), "\n",
            "ATR: ", DoubleToString(atr[0], 2), "\n",
            "Spread: ", DoubleToString((ask-bid)/SymbolInfoDouble(TradeSymbol,SYMBOL_POINT), 1), " pts\n",
