@@ -5,7 +5,7 @@
 #property strict
 #property copyright "Copyright 2026, Gemini Quant Lab"
 #property link      ""
-#property version   "7.00"
+#property version   "7.10"
 #property description "Gold Quant M5 Scalper - Mean Reversion Z-Score EA"
 
 //--- Inputs: Strategy
@@ -19,11 +19,11 @@ input int      InpEndHour     = 18;       // Trade window end hour, exclusive (a
 input int      InpMagic       = 777333;   // Magic number
 
 //--- Inputs: Partial Profit & Trailing
-input double   InpTP1_ATR        = 0.5;   // TP1: close 50% at this ATR profit (0.3–0.8)
+input double   InpTP1_ATR        = 1.0;   // TP1: close 50% at this ATR profit
 input double   InpTP2_ATR        = 2.0;   // TP2: close 25% at this ATR profit
-input double   InpTrailActivATR  = 1.0;   // Start trailing after this ATR profit (0.8–1.2)
-input double   InpTrailTightATR  = 1.0;   // Tight trail multiplier (before TP2)
-input double   InpTrailLooseATR  = 2.0;   // Loose trail multiplier (after TP2)
+input double   InpHardTP_ATR     = 3.0;   // Hard TP on order (safety net, 0 = disabled)
+input double   InpTrailTightATR  = 0.8;   // Tight trail multiplier (after TP1, before TP2)
+input double   InpTrailLooseATR  = 1.5;   // Loose trail multiplier (after TP2)
 input double   InpTrailBuyATR    = 0.0;   // Buy trail override (0 = use standard)
 input double   InpTrailSellATR   = 0.0;   // Sell trail override (0 = use standard)
 
@@ -442,7 +442,7 @@ bool ClosePartial(double fraction, string tag) {
 }
 
 //+------------------------------------------------------------------+
-void MoveSLToBreakeven() {
+void MoveSLToBreakevenPlus(double atrVal) {
    if(!SelectOwnPosition()) return;
 
    double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -451,11 +451,15 @@ void MoveSLToBreakeven() {
    double spread     = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK) - SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
    int    digits     = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
 
+   // Lock in a small profit: entry + spread + 0.2×ATR
+   // This ensures the remaining position nets positive even if stopped
+   double lockIn = spread + (atrVal * 0.2);
+
    double beSL;
    if(posType == POSITION_TYPE_BUY)
-      beSL = NormalizeDouble(entryPrice + spread, digits);
+      beSL = NormalizeDouble(entryPrice + lockIn, digits);
    else
-      beSL = NormalizeDouble(entryPrice - spread, digits);
+      beSL = NormalizeDouble(entryPrice - lockIn, digits);
 
    MqlTradeRequest req = {}; MqlTradeResult res = {};
    req.action   = TRADE_ACTION_SLTP;
@@ -465,7 +469,7 @@ void MoveSLToBreakeven() {
    req.tp       = currentTP;
 
    if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
-      Print("Breakeven modify failed: retcode=", res.retcode);
+      Print("Breakeven+ modify failed: retcode=", res.retcode);
    }
 }
 
@@ -483,20 +487,18 @@ void ModifySL(double nSL, double currentTP) {
 }
 
 //+------------------------------------------------------------------+
-//  Stepped Trailing Stop
+//  Stepped Trailing Stop — only active after TP1
 //+------------------------------------------------------------------+
 void HandleTrailingStop(double atrVal) {
+   // Only trail after TP1 has been hit (before TP1, the initial SL protects)
+   if(!HasTag(tagTP1)) return;
+
    double currentSL = PositionGetDouble(POSITION_SL);
    double currentTP = PositionGetDouble(POSITION_TP);
    double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
    long type = PositionGetInteger(POSITION_TYPE);
    int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
-
-   double profitATR = GetPositionProfitATR(atrVal);
-
-   // Don't trail until price has moved enough (prevents early stop-outs)
-   if(profitATR < InpTrailActivATR) return;
 
    // Determine trail multiplier: tight before TP2, loose after
    double trailMult;
@@ -531,11 +533,11 @@ void ManagePosition(double atrVal) {
    bool hitTP1 = HasTag(tagTP1);
    bool hitTP2 = HasTag(tagTP2);
 
-   // --- TP1: Close 50% at InpTP1_ATR profit ? move SL to breakeven ---
+   // --- TP1: Close 50% at InpTP1_ATR profit, move SL to breakeven+ ---
    if(!hitTP1 && profitATR >= InpTP1_ATR) {
       if(ClosePartial(0.50, "TP1")) {
-         MoveSLToBreakeven();
-         Print("TP1 hit at ", DoubleToString(profitATR, 2), " ATR profit. 50% closed, SL ? breakeven.");
+         MoveSLToBreakevenPlus(atrVal);
+         Print("TP1 hit at ", DoubleToString(profitATR, 2), " ATR profit. 50% closed, SL to BE+.");
       }
    }
 
@@ -668,6 +670,14 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a) {
    lot = NormalizeLot(lot);
    int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
 
+   // Hard TP as safety net (EA manages exits, but this protects against disconnects)
+   double tp = 0;
+   if(InpHardTP_ATR > 0) {
+      double tpD = a * InpHardTP_ATR;
+      tp = (type == ORDER_TYPE_BUY) ? (p + tpD) : (p - tpD);
+      tp = NormalizeDouble(tp, digits);
+   }
+
    req.action       = TRADE_ACTION_DEAL;
    req.symbol       = TradeSymbol;
    req.volume       = lot;
@@ -675,6 +685,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a) {
    req.price        = p;
    req.magic        = InpMagic;
    req.sl           = NormalizeDouble(sl, digits);
+   req.tp           = tp;
    req.deviation    = InpSlippage;
    req.comment      = "GQS";
    uint fill = (uint)SymbolInfoInteger(TradeSymbol, SYMBOL_FILLING_MODE);
