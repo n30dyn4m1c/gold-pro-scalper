@@ -5,7 +5,7 @@
 #property strict
 #property copyright "Copyright 2026, Gemini Quant Lab"
 #property link      ""
-#property version   "4.00"
+#property version   "5.00"
 #property description "Gold Quant M5 Scalper - Mean Reversion Z-Score EA"
 
 //--- Inputs: Strategy
@@ -14,10 +14,18 @@ input double   InpEntryZ      = 2.0;      // Z-Score entry threshold (1.8–2.5)
 input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
 input double   InpATRStop     = 2.0;      // ATR multiplier for SL (1.5–2.5)
-input double   InpTrailingATR = 1.5;      // ATR multiplier for trailing
 input int      InpStartHour   = 10;       // Trade window start hour
 input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
 input int      InpMagic       = 777333;   // Magic number
+
+//--- Inputs: Partial Profit & Trailing
+input double   InpTP1_ATR        = 0.5;   // TP1: close 50% at this ATR profit (0.3–0.8)
+input double   InpTP2_ATR        = 2.0;   // TP2: close 25% at this ATR profit
+input double   InpTrailActivATR  = 1.0;   // Start trailing after this ATR profit (0.8–1.2)
+input double   InpTrailTightATR  = 1.0;   // Tight trail multiplier (before TP2)
+input double   InpTrailLooseATR  = 2.0;   // Loose trail multiplier (after TP2)
+input double   InpTrailBuyATR    = 0.0;   // Buy trail override (0 = use standard)
+input double   InpTrailSellATR   = 0.0;   // Sell trail override (0 = use standard)
 
 //--- Inputs: Indicators
 input int      InpMAPeriod    = 20;       // MA / StdDev period
@@ -47,17 +55,19 @@ input double   InpATRMinMultiple  = 0.5;   // Min ATR vs 50-period avg (skip if 
 
 //--- Global Handles & State
 int handleMA, handleSD, handleATR, handleADX, handleATR50;
-string partialTag = "_P1";
 
-//--- News schedule: high-impact and very-high-impact stored separately
+//--- Partial close tags (embedded in trade comment)
+string tagTP1 = "_T1";
+string tagTP2 = "_T2";
+
+//--- News schedule
 #define MAX_NEWS 40
-datetime newsHigh[MAX_NEWS];      // High-impact event times
+datetime newsHigh[MAX_NEWS];
 int newsHighCount = 0;
-datetime newsVHI[MAX_NEWS];       // Very-high-impact event times (NFP, CPI, FOMC, GDP)
+datetime newsVHI[MAX_NEWS];
 int newsVHICount = 0;
 datetime lastNewsLoad = 0;
 
-//--- Very-high-impact event keywords
 string vhiKeywords[] = {"Nonfarm Payrolls", "NFP", "Non-Farm",
                          "CPI ", "Consumer Price Index",
                          "FOMC", "Federal Funds Rate", "Interest Rate Decision",
@@ -88,7 +98,6 @@ int OnInit() {
 
    if(InpUseNewsFilter) LoadNewsEvents();
 
-   // Initialize daily loss tracker
    dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
    dailyStartDay = dt.day_of_year;
@@ -135,7 +144,7 @@ bool IsDailyLossLimitHit() {
 }
 
 //+------------------------------------------------------------------+
-//  News Filter — uses MQL5 economic calendar
+//  News Filter
 //+------------------------------------------------------------------+
 bool IsVHIEvent(string eventName) {
    for(int k = 0; k < ArraySize(vhiKeywords); k++) {
@@ -165,7 +174,6 @@ void LoadNewsEvents() {
       if(!CalendarCountryById(event.country_id, country)) continue;
       if(country.currency != "USD") continue;
 
-      // Classify as very-high-impact or regular high-impact
       if(IsVHIEvent(event.name) && newsVHICount < MAX_NEWS) {
          newsVHI[newsVHICount] = values[i].time;
          newsVHICount++;
@@ -179,11 +187,9 @@ void LoadNewsEvents() {
    Print("News loaded: ", newsHighCount, " high-impact, ", newsVHICount, " very-high-impact USD events today");
 }
 
-//+------------------------------------------------------------------+
 bool IsNearNews() {
    if(!InpUseNewsFilter) return false;
 
-   // Reload news once per day
    MqlDateTime dtNow, dtLast;
    TimeToStruct(TimeCurrent(), dtNow);
    TimeToStruct(lastNewsLoad, dtLast);
@@ -191,14 +197,12 @@ bool IsNearNews() {
 
    datetime now = TimeCurrent();
 
-   // Check very-high-impact events (wider window)
    for(int i = 0; i < newsVHICount; i++) {
       long diff = (long)(newsVHI[i] - now);
       if(diff > -(InpVHINewsMinsAfter * 60) && diff < (InpVHINewsMinsBefore * 60))
          return true;
    }
 
-   // Check regular high-impact events (standard window)
    for(int i = 0; i < newsHighCount; i++) {
       long diff = (long)(newsHigh[i] - now);
       if(diff > -(InpNewsMinsAfter * 60) && diff < (InpNewsMinsBefore * 60))
@@ -208,14 +212,12 @@ bool IsNearNews() {
    return false;
 }
 
-//+------------------------------------------------------------------+
 bool IsVHINewsImminent() {
    if(!InpUseNewsFilter || !InpCloseBeforeVHINews) return false;
 
    datetime now = TimeCurrent();
    for(int i = 0; i < newsVHICount; i++) {
       long diff = (long)(newsVHI[i] - now);
-      // Event is upcoming within the pre-news window
       if(diff > 0 && diff < (InpVHINewsMinsBefore * 60))
          return true;
    }
@@ -239,6 +241,8 @@ bool IsVolatilityOk(double atrFast) {
 }
 
 //+------------------------------------------------------------------+
+//  Position helpers
+//+------------------------------------------------------------------+
 bool SelectOwnPosition() {
    for(int i = PositionsTotal() - 1; i >= 0; i--) {
       ulong ticket = PositionGetTicket(i);
@@ -251,13 +255,27 @@ bool SelectOwnPosition() {
    return false;
 }
 
-//+------------------------------------------------------------------+
-bool IsPartialClosed() {
+bool HasTag(string tag) {
    string comment = PositionGetString(POSITION_COMMENT);
-   return (StringFind(comment, partialTag) >= 0);
+   return (StringFind(comment, tag) >= 0);
 }
 
-//+------------------------------------------------------------------+
+double GetPositionProfitATR(double atrVal) {
+   if(atrVal <= 0) return 0;
+   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+   double bid   = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double ask   = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   long   type  = PositionGetInteger(POSITION_TYPE);
+
+   double dist;
+   if(type == POSITION_TYPE_BUY)
+      dist = bid - entry;
+   else
+      dist = entry - ask;
+
+   return dist / atrVal;
+}
+
 double NormalizeLot(double lot) {
    double minLot  = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MAX);
@@ -270,6 +288,8 @@ double NormalizeLot(double lot) {
    return lot;
 }
 
+//+------------------------------------------------------------------+
+//  Close helpers
 //+------------------------------------------------------------------+
 void CloseAllOwnPositions(string reason) {
    for(int i = PositionsTotal() - 1; i >= 0; i--) {
@@ -299,9 +319,151 @@ void CloseAllOwnPositions(string reason) {
    }
 }
 
+bool ClosePartial(double fraction, string tag) {
+   double vol = PositionGetDouble(POSITION_VOLUME);
+   double closeVol = NormalizeLot(vol * fraction);
+
+   if(closeVol >= vol) {
+      Print("Cannot partial close: volume too small to split (", tag, ")");
+      return false;
+   }
+
+   MqlTradeRequest req = {}; MqlTradeResult res = {};
+   req.action   = TRADE_ACTION_DEAL;
+   req.position = PositionGetInteger(POSITION_TICKET);
+   req.symbol   = TradeSymbol;
+   req.volume   = closeVol;
+   req.type     = (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   req.price    = (req.type==ORDER_TYPE_SELL) ? SymbolInfoDouble(TradeSymbol, SYMBOL_BID)
+                                              : SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   req.deviation = InpSlippage;
+   uint fill = (uint)SymbolInfoInteger(TradeSymbol, SYMBOL_FILLING_MODE);
+   req.type_filling = (fill & SYMBOL_FILLING_FOK) ? ORDER_FILLING_FOK : ORDER_FILLING_IOC;
+
+   if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
+      Print("Partial close failed (", tag, "): retcode=", res.retcode, " comment=", res.comment);
+      return false;
+   }
+
+   Print("Partial close (", tag, "): closed ", closeVol, " of ", vol, " lots");
+   return true;
+}
+
+//+------------------------------------------------------------------+
+void MoveSLToBreakeven() {
+   if(!SelectOwnPosition()) return;
+
+   double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+   double currentTP  = PositionGetDouble(POSITION_TP);
+   long   posType    = PositionGetInteger(POSITION_TYPE);
+   double spread     = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK) - SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   int    digits     = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+
+   double beSL;
+   if(posType == POSITION_TYPE_BUY)
+      beSL = NormalizeDouble(entryPrice + spread, digits);
+   else
+      beSL = NormalizeDouble(entryPrice - spread, digits);
+
+   MqlTradeRequest req = {}; MqlTradeResult res = {};
+   req.action   = TRADE_ACTION_SLTP;
+   req.position = PositionGetInteger(POSITION_TICKET);
+   req.symbol   = TradeSymbol;
+   req.sl       = beSL;
+   req.tp       = currentTP;
+
+   if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
+      Print("Breakeven modify failed: retcode=", res.retcode);
+   }
+}
+
+//+------------------------------------------------------------------+
+void ModifySL(double nSL, double currentTP) {
+   MqlTradeRequest r = {}; MqlTradeResult rs = {};
+   r.action   = TRADE_ACTION_SLTP;
+   r.position = PositionGetInteger(POSITION_TICKET);
+   r.symbol   = TradeSymbol;
+   r.sl       = nSL;
+   r.tp       = currentTP;
+   if(!OrderSend(r, rs) || rs.retcode != TRADE_RETCODE_DONE) {
+      Print("TrailSL modify failed: retcode=", rs.retcode);
+   }
+}
+
+//+------------------------------------------------------------------+
+//  Stepped Trailing Stop
+//+------------------------------------------------------------------+
+void HandleTrailingStop(double atrVal) {
+   double currentSL = PositionGetDouble(POSITION_SL);
+   double currentTP = PositionGetDouble(POSITION_TP);
+   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   long type = PositionGetInteger(POSITION_TYPE);
+   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+
+   double profitATR = GetPositionProfitATR(atrVal);
+
+   // Don't trail until price has moved enough (prevents early stop-outs)
+   if(profitATR < InpTrailActivATR) return;
+
+   // Determine trail multiplier: tight before TP2, loose after
+   double trailMult;
+   bool pastTP2 = HasTag(tagTP2);
+   if(pastTP2)
+      trailMult = InpTrailLooseATR;
+   else
+      trailMult = InpTrailTightATR;
+
+   // Asymmetric override: different trail for buys vs sells
+   if(type == POSITION_TYPE_BUY && InpTrailBuyATR > 0)
+      trailMult = InpTrailBuyATR;
+   else if(type == POSITION_TYPE_SELL && InpTrailSellATR > 0)
+      trailMult = InpTrailSellATR;
+
+   double trailDist = atrVal * trailMult;
+
+   if(type == POSITION_TYPE_BUY) {
+      double newSL = NormalizeDouble(bid - trailDist, digits);
+      if(newSL > currentSL + (atrVal * 0.1)) ModifySL(newSL, currentTP);
+   } else {
+      double newSL = NormalizeDouble(ask + trailDist, digits);
+      if(newSL < currentSL - (atrVal * 0.1) || currentSL == 0) ModifySL(newSL, currentTP);
+   }
+}
+
+//+------------------------------------------------------------------+
+//  Position Management — 3-stage exit
+//+------------------------------------------------------------------+
+void ManagePosition(double atrVal) {
+   double profitATR = GetPositionProfitATR(atrVal);
+   bool hitTP1 = HasTag(tagTP1);
+   bool hitTP2 = HasTag(tagTP2);
+
+   // --- TP1: Close 50% at InpTP1_ATR profit → move SL to breakeven ---
+   if(!hitTP1 && profitATR >= InpTP1_ATR) {
+      if(ClosePartial(0.50, "TP1")) {
+         MoveSLToBreakeven();
+         Print("TP1 hit at ", DoubleToString(profitATR, 2), " ATR profit. 50% closed, SL → breakeven.");
+      }
+   }
+
+   // --- TP2: Close 25% (~50% of remaining) at InpTP2_ATR profit ---
+   if(hitTP1 && !hitTP2 && profitATR >= InpTP2_ATR) {
+      if(SelectOwnPosition()) {
+         if(ClosePartial(0.50, "TP2")) {
+            Print("TP2 hit at ", DoubleToString(profitATR, 2), " ATR profit. Another 25% closed. ~25% running with loose trail.");
+         }
+      }
+   }
+
+   // --- Stepped trailing on whatever remains ---
+   if(SelectOwnPosition()) {
+      HandleTrailingStop(atrVal);
+   }
+}
+
 //+------------------------------------------------------------------+
 void OnTick() {
-   // Daily loss reset check
    CheckDailyReset();
 
    double ma[1], sd[1], atr[1], adx[1];
@@ -322,7 +484,7 @@ void OnTick() {
    // --- DAILY LOSS: close everything and stop ---
    if(lossLimitHit) {
       if(SelectOwnPosition()) CloseAllOwnPositions("daily loss limit");
-      Comment("--- GOLD QUANT M5 SCALPER v4 ---\n",
+      Comment("--- GOLD QUANT M5 SCALPER v5 ---\n",
               "DAILY LOSS LIMIT REACHED - TRADING STOPPED\n",
               "Loss: ", DoubleToString(((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0, 2), "%");
       return;
@@ -335,16 +497,7 @@ void OnTick() {
 
    // --- POSITION MANAGEMENT ---
    if(SelectOwnPosition()) {
-      bool alreadyPartial = IsPartialClosed();
-
-      // 1. SCALING OUT: Close 50% at Mean (Z-Score near 0)
-      if(!alreadyPartial && MathAbs(zScore) < 0.2) {
-         ScaleOutHalf();
-         Print("TP1 Hit: 50% Closed. SL moved to Breakeven.");
-      }
-
-      // 2. TRAILING
-      HandleTrailingStop(atr[0]);
+      ManagePosition(atr[0]);
    } else {
       // --- ENTRY LOGIC ---
       bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
@@ -360,8 +513,16 @@ void OnTick() {
    }
 
    double dailyLossPct = ((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0;
+   double profitATR = 0;
+   string exitStage = "---";
+   if(SelectOwnPosition()) {
+      profitATR = GetPositionProfitATR(atr[0]);
+      if(HasTag(tagTP2))      exitStage = "TP2 done (~25% running, loose trail)";
+      else if(HasTag(tagTP1)) exitStage = "TP1 done (50% running, tight trail)";
+      else                    exitStage = "Full position (waiting TP1)";
+   }
 
-   Comment("--- GOLD QUANT M5 SCALPER v4 ---\n",
+   Comment("--- GOLD QUANT M5 SCALPER v5 ---\n",
            "Z-Score: ", DoubleToString(zScore, 2), "\n",
            "ADX: ", DoubleToString(adx[0], 1), "\n",
            "ATR: ", DoubleToString(atr[0], 2), "\n",
@@ -369,92 +530,8 @@ void OnTick() {
            "News Block: ", (nearNews ? "YES" : "no"),
            (vhiImminent ? " [VHI CLOSE]" : ""), "\n",
            "Vol Filter: ", (IsVolatilityOk(atr[0]) ? "OK" : "BLOCKED"), "\n",
+           "Profit: ", DoubleToString(profitATR, 2), " ATR | ", exitStage, "\n",
            "Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(InpMaxDailyLossPct, 1), "% limit");
-}
-
-//+------------------------------------------------------------------+
-void ScaleOutHalf() {
-   MqlTradeRequest req = {}; MqlTradeResult res = {};
-   double vol = PositionGetDouble(POSITION_VOLUME);
-   double halfVol = NormalizeLot(vol * 0.5);
-
-   if(halfVol >= vol) {
-      Print("Cannot scale out: volume too small to split");
-      return;
-   }
-
-   req.action = TRADE_ACTION_DEAL;
-   req.position = PositionGetInteger(POSITION_TICKET);
-   req.symbol = TradeSymbol;
-   req.volume = halfVol;
-   req.type = (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
-   req.price = (req.type==ORDER_TYPE_SELL)?SymbolInfoDouble(TradeSymbol, SYMBOL_BID):SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
-   req.deviation = InpSlippage;
-   uint fill = (uint)SymbolInfoInteger(TradeSymbol, SYMBOL_FILLING_MODE);
-   req.type_filling = (fill & SYMBOL_FILLING_FOK) ? ORDER_FILLING_FOK : ORDER_FILLING_IOC;
-
-   if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
-      Print("ScaleOut failed: retcode=", res.retcode, " comment=", res.comment);
-      return;
-   }
-
-   // Move SL to breakeven (entry + spread cost)
-   if(!SelectOwnPosition()) return;
-
-   double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-   double currentTP  = PositionGetDouble(POSITION_TP);
-   long   posType    = PositionGetInteger(POSITION_TYPE);
-   double spread     = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK) - SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
-   int    digits     = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
-
-   double beSL;
-   if(posType == POSITION_TYPE_BUY)
-      beSL = NormalizeDouble(entryPrice + spread, digits);
-   else
-      beSL = NormalizeDouble(entryPrice - spread, digits);
-
-   MqlTradeRequest beReq = {}; MqlTradeResult beRes = {};
-   beReq.action   = TRADE_ACTION_SLTP;
-   beReq.position = PositionGetInteger(POSITION_TICKET);
-   beReq.symbol   = TradeSymbol;
-   beReq.sl       = beSL;
-   beReq.tp       = currentTP;
-
-   if(!OrderSend(beReq, beRes) || beRes.retcode != TRADE_RETCODE_DONE) {
-      Print("Breakeven modify failed: retcode=", beRes.retcode);
-   }
-}
-
-//+------------------------------------------------------------------+
-void HandleTrailingStop(double atrVal) {
-   double currentSL = PositionGetDouble(POSITION_SL);
-   double currentTP = PositionGetDouble(POSITION_TP);
-   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
-   long type = PositionGetInteger(POSITION_TYPE);
-   double trailDist = atrVal * InpTrailingATR;
-   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
-
-   if(type == POSITION_TYPE_BUY) {
-      double newSL = NormalizeDouble(bid - trailDist, digits);
-      if(newSL > currentSL + (atrVal * 0.2)) ModifySL(newSL, currentTP);
-   } else {
-      double newSL = NormalizeDouble(ask + trailDist, digits);
-      if(newSL < currentSL - (atrVal * 0.2) || currentSL == 0) ModifySL(newSL, currentTP);
-   }
-}
-
-//+------------------------------------------------------------------+
-void ModifySL(double nSL, double currentTP) {
-   MqlTradeRequest r = {}; MqlTradeResult rs = {};
-   r.action   = TRADE_ACTION_SLTP;
-   r.position = PositionGetInteger(POSITION_TICKET);
-   r.symbol   = TradeSymbol;
-   r.sl       = nSL;
-   r.tp       = currentTP;
-   if(!OrderSend(r, rs) || rs.retcode != TRADE_RETCODE_DONE) {
-      Print("TrailSL modify failed: retcode=", rs.retcode);
-   }
 }
 
 //+------------------------------------------------------------------+
