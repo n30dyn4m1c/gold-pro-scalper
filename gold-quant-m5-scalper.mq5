@@ -11,7 +11,7 @@
 //--- Inputs: Strategy
 input string   TradeSymbol    = "GOLD";
 input double   InpEntryZ      = 2.5;      // Z-Score entry threshold (2.3–2.7 sweet spot)
-input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
+input int      InpADXFilter   = 25;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
 input double   InpATRStop     = 2.0;      // ATR multiplier for SL (1.5–2.5)
 input int      InpStartHour   = 9;        // Trade window start hour (London open)
@@ -21,8 +21,8 @@ input int      InpMagic       = 777333;   // Magic number
 //--- Inputs: Partial Profit & Trailing
 input double   InpTP1_ATR        = 1.0;   // TP1: close 50% at this ATR profit
 input double   InpTP2_ATR        = 2.0;   // TP2: close 25% at this ATR profit
-input double   InpHardTP_ATR     = 3.0;   // Hard TP on order (safety net, 0 = disabled)
-input double   InpTrailTightATR  = 0.8;   // Tight trail multiplier (after TP1, before TP2)
+input double   InpHardTP_ATR     = 5.0;   // Hard TP on order (safety net, 0 = disabled)
+input double   InpTrailTightATR  = 1.0;   // Tight trail multiplier (after TP1, before TP2)
 input double   InpTrailLooseATR  = 1.5;   // Loose trail multiplier (after TP2)
 input double   InpTrailBuyATR    = 0.0;   // Buy trail override (0 = use standard)
 input double   InpTrailSellATR   = 0.0;   // Sell trail override (0 = use standard)
@@ -35,8 +35,8 @@ input int      InpRSIPeriod   = 14;       // RSI period
 
 //--- Inputs: RSI Confirmation
 input bool     InpUseRSIFilter   = true;  // Enable RSI confirmation filter
-input double   InpRSIOversold    = 30.0;  // RSI below this = oversold (allow BUY)
-input double   InpRSIOverbought  = 70.0;  // RSI above this = overbought (allow SELL)
+input double   InpRSIOversold    = 35.0;  // RSI below this = oversold (allow BUY)
+input double   InpRSIOverbought  = 65.0;  // RSI above this = overbought (allow SELL)
 
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
@@ -52,7 +52,7 @@ input bool     InpCloseBeforeVHINews = true;  // Close open trades before very-h
 
 //--- Inputs: Capital Protection
 input bool     InpUseDailyLossLimit  = true;  // Enable max daily loss stop
-input double   InpMaxDailyLossPct    = 4.0;   // Max daily loss % of balance (stops trading)
+input double   InpMaxDailyLossPct    = 6.0;   // Max daily loss % of balance (stops trading)
 input bool     InpUseWeeklyLossLimit = true;  // Enable max weekly loss stop
 input double   InpMaxWeeklyLossPct   = 10.0;  // Max weekly loss % (stops trading until next week)
 input bool     InpUseEquityStop      = true;  // Enable equity drawdown global stop
@@ -60,7 +60,7 @@ input double   InpMaxEquityDDPct     = 15.0;  // Max drawdown % from peak equity
 
 //--- Inputs: Volatility Filter
 input bool     InpUseVolFilter    = true;  // Enable volatility-adjusted entry
-input double   InpATRMaxMultiple  = 1.7;   // Max ATR vs 50-period avg (skip near-breakouts)
+input double   InpATRMaxMultiple  = 2.2;   // Max ATR vs 50-period avg (skip near-breakouts)
 input double   InpATRMinMultiple  = 0.5;   // Min ATR vs 50-period avg (skip if too quiet)
 
 //--- Global Handles & State
