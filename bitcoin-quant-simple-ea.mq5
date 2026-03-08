@@ -1,45 +1,45 @@
-﻿//+------------------------------------------------------------------+
-//|                                      gold-quant-m5-scalper.mq5   |
+//+------------------------------------------------------------------+
+//|                                  bitcoin-quant-simple-ea.mq5     |
 //|                                  Copyright 2026, Gemini Quant Lab |
 //+------------------------------------------------------------------+
 #property strict
 #property copyright "Copyright 2026, Gemini Quant Lab"
 #property link      ""
-#property version   "4.00"
-#property description "Gold Quant M5 Scalper - Mean Reversion Z-Score EA"
+#property version   "3.00"
+#property description "Bitcoin Quant M15 Scalper - Mean Reversion Z-Score EA"
 
 //--- Inputs: Strategy
-input string   TradeSymbol    = "GOLD";
-input double   InpEntryZ      = 2.2;      // Z-Score entry threshold (2.0–2.5 aggressive frequency)
-input int      InpADXFilter   = 25;       // ADX range filter (allows mild trends)
+input string   TradeSymbol    = "BTCUSD";
+input double   InpEntryZ      = 2.2;      // Z-Score entry (back to proven gold threshold)
+input int      InpADXFilter   = 22;       // ADX range filter (moderate — filters strong trends only)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
-input double   InpATRStop     = 1.2;      // ATR multiplier for SL (tight for mean reversion)
-input double   InpHardTP_ATR  = 2.0;      // Hard TP (ATR multiplier) — server-side, always set
-input int      InpStartHour   = 8;        // Trade window start hour (GMT+2)
-input int      InpEndHour     = 20;       // Trade window end hour, exclusive (GMT+2)
-input int      InpStallBars   = 8;        // Close stalled trade after this many bars
-input double   InpStallMinATR = 0.2;     // Min ATR profit required within stall window
-input int      InpLoserBars   = 4;       // Close if profit < 0 after this many bars (0 = disabled)
-input int      InpMagic       = 777333;   // Magic number
+input double   InpATRStop     = 1.5;      // ATR multiplier for SL (wider — BTC whipsaws more)
+input double   InpHardTP_ATR  = 1.5;      // Hard TP (ATR multiplier) — take profit fast, BTC snaps back quick
+input int      InpStartHour   = 0;        // Trade window start hour (24/7 market)
+input int      InpEndHour     = 24;       // Trade window end hour (spread filter gates quality)
+input int      InpStallBars   = 6;        // Close stalled trade after this many bars (6x15m = 90min)
+input double   InpStallMinATR = 0.2;      // Min ATR profit required within stall window
+input int      InpLoserBars   = 3;        // Close if profit < 0 after this many bars (3x15m = 45min)
+input int      InpMagic       = 777444;   // Magic number (different from gold EA)
 
 //--- Inputs: Indicators
-input int      InpMAPeriod    = 20;       // MA / StdDev period
+input int      InpMAPeriod    = 20;       // MA / StdDev period (5h on M15)
 input int      InpATRPeriod   = 14;       // ATR period
 input int      InpADXPeriod   = 14;       // ADX period
 input int      InpRSIPeriod   = 14;       // RSI period
 
 //--- Inputs: RSI Confirmation
-input bool     InpUseRSIFilter   = false; // Enable RSI confirmation filter (disabled for max aggression)
-input double   InpRSIOversold    = 35.0;  // RSI below this = oversold (allow BUY)
-input double   InpRSIOverbought  = 65.0;  // RSI above this = overbought (allow SELL)
+input bool     InpUseRSIFilter   = true;  // RSI confirmation ON (prevents fading momentum)
+input double   InpRSIOversold    = 38.0;  // RSI below this = oversold (allow BUY)
+input double   InpRSIOverbought  = 62.0;  // RSI above this = overbought (allow SELL)
 
 //--- Inputs: Execution
-input int      InpSlippage    = 30;       // Max slippage in points
-input double   InpMaxSpreadPts = 35.0;    // Max allowed spread in points (tight conditions only)
+input int      InpSlippage    = 50;       // Max slippage in points (crypto slips more)
+input double   InpMaxSpreadPts = 5000.0;  // Max spread in points (~$50 if point=0.01)
 
 //--- Inputs: Daily Loss Limit
 input bool     InpUseDailyLossLimit  = true;  // Enable max daily loss stop
-input double   InpMaxDailyLossPct    = 25.0;   // Max daily loss % (survive to trade tomorrow)
+input double   InpMaxDailyLossPct    = 25.0;  // Max daily loss % (survive to trade tomorrow)
 
 //--- Global Handles & State
 int handleMA, handleSD, handleATR, handleADX, handleRSI;
@@ -205,7 +205,7 @@ void OnTick() {
    // --- DAILY LOSS: close everything and stop ---
    if(lossLimitHit) {
       if(SelectOwnPosition()) CloseAllOwnPositions("daily loss limit");
-      Comment("--- GOLD QUANT M5 SCALPER v4 ---\n",
+      Comment("--- BTC QUANT M15 v1 ---\n",
               "DAILY LOSS LIMIT REACHED - TRADING STOPPED\n",
               "Loss: ", DoubleToString(((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0, 2), "%");
       return;
@@ -249,7 +249,7 @@ void OnTick() {
 
    double dailyLossPct = ((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0;
 
-   Comment("--- GOLD QUANT MICRO v5 ---\n",
+   Comment("--- BTC QUANT M15 v1 ---\n",
            "Equity: $", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2), "\n",
            "Z-Score: ", DoubleToString(zScore, 2), "\n",
            "ADX: ", DoubleToString(adx[0], 1), "\n",
@@ -289,7 +289,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a) {
    req.sl           = NormalizeDouble(sl, digits);
    req.tp           = tp;
    req.deviation    = InpSlippage;
-   req.comment      = "GQS";
+   req.comment      = "BQS";
    uint fill = (uint)SymbolInfoInteger(TradeSymbol, SYMBOL_FILLING_MODE);
    req.type_filling = (fill & SYMBOL_FILLING_FOK) ? ORDER_FILLING_FOK : ORDER_FILLING_IOC;
 
