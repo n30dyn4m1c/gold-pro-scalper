@@ -14,8 +14,9 @@ input double   InpEntryZ      = 2.0;      // Z-Score entry threshold (1.8–2.5)
 input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
 input double   InpATRStop     = 2.0;      // ATR multiplier for SL (1.5–2.5)
+input double   InpTP1_ATR     = 1.0;      // TP1: close 50% at this ATR profit
 input double   InpTrailingATR = 1.5;      // ATR multiplier for trailing
-input int      InpStartHour   = 15;       // Trade window start hour (London/NY overlap, GMT+2)
+input int      InpStartHour   = 10;       // Trade window start hour (London/NY overlap, GMT+2)
 input int      InpEndHour     = 19;       // Trade window end hour, exclusive (GMT+2)
 input int      InpMagic       = 777333;   // Magic number
 
@@ -258,6 +259,23 @@ bool IsPartialClosed() {
 }
 
 //+------------------------------------------------------------------+
+double GetPositionProfitATR(double atrVal) {
+   if(atrVal <= 0) return 0;
+   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+   double bid   = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double ask   = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   long   type  = PositionGetInteger(POSITION_TYPE);
+
+   double dist;
+   if(type == POSITION_TYPE_BUY)
+      dist = bid - entry;
+   else
+      dist = entry - ask;
+
+   return dist / atrVal;
+}
+
+//+------------------------------------------------------------------+
 double NormalizeLot(double lot) {
    double minLot  = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MAX);
@@ -337,10 +355,11 @@ void OnTick() {
    if(SelectOwnPosition()) {
       bool alreadyPartial = IsPartialClosed();
 
-      // 1. SCALING OUT: Close 50% at Mean (Z-Score near 0)
-      if(!alreadyPartial && MathAbs(zScore) < 0.2) {
+      // 1. TP1: Close 50% at +InpTP1_ATR profit
+      double profitATR = GetPositionProfitATR(atr[0]);
+      if(!alreadyPartial && profitATR >= InpTP1_ATR) {
          ScaleOutHalf();
-         Print("TP1 Hit: 50% Closed. SL moved to Breakeven.");
+         Print("TP1 Hit at ", DoubleToString(profitATR, 2), " ATR: 50% Closed. SL moved to Breakeven.");
       }
 
       // 2. TRAILING
