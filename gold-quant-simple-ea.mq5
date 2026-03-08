@@ -10,20 +10,18 @@
 
 //--- Inputs: Strategy
 input string   TradeSymbol    = "GOLD";
-input double   InpEntryZ      = 2.1;      // Z-Score entry threshold (2.0–2.5 aggressive frequency)
+input double   InpEntryZ      = 2.2;      // Z-Score entry threshold (2.0–2.5 aggressive frequency)
 input int      InpADXFilter   = 25;       // ADX range filter (allows mild trends)
-input double   InpRiskPct     = 10.0;     // Risk % per trade (below threshold)
-input double   InpRiskReduceAt   = 200.0; // Reduce risk when equity exceeds this ($)
-input double   InpReducedRiskPct = 5.0;   // Reduced risk % above threshold
-input double   InpATRStop     = 1.6;      // ATR multiplier for SL (1.2–1.8 for M5 gold)
-input double   InpTP1_ATR     = 1.3;      // TP1: close 50% at this ATR profit
+input double   InpRiskPct     = 10.0;     // Risk % per trade
+input double   InpATRStop     = 1.5;      // ATR multiplier for SL (1.2–1.8 for M5 gold)
+input double   InpTP1_ATR     = 1.5;      // TP1: close 50% at this ATR profit
 input double   InpHardTP_ATR  = 0.0;      // Hard TP safety net (ATR multiplier, 0 = disabled)
-input double   InpTrailingATR = 2.2;      // ATR multiplier for trailing (loose for runners)
+input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing (loose for runners)
 input int      InpStartHour   = 9;        // Trade window start hour (early London, GMT+2)
 input int      InpEndHour     = 20;       // Trade window end hour, exclusive (late NY, GMT+2)
 input int      InpStallBars   = 6;        // Close stalled trade after this many bars
 input double   InpStallMinATR = 0.15;    // Min ATR profit required within stall window
-input int      InpLoserBars   = 4;       // Close if profit < 0 after this many bars (0 = disabled)
+input int      InpLoserBars   = 3;       // Close if profit < 0 after this many bars (0 = disabled)
 input int      InpMagic       = 777333;   // Magic number
 
 //--- Inputs: Indicators
@@ -379,9 +377,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a) {
    MqlTradeRequest req = {}; MqlTradeResult res = {};
    double slD = a * InpATRStop;
    double sl = (type == ORDER_TYPE_BUY) ? (p - slD) : (p + slD);
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   double effectiveRiskPct = (InpRiskReduceAt > 0 && equity > InpRiskReduceAt) ? InpReducedRiskPct : InpRiskPct;
-   double risk = AccountInfoDouble(ACCOUNT_BALANCE) * (effectiveRiskPct / 100.0);
+   double risk = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPct / 100.0);
    double tickV = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_VALUE);
    double tickS = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_SIZE);
 
