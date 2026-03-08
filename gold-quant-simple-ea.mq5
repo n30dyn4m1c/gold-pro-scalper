@@ -17,8 +17,8 @@ input double   InpATRStop     = 1.5;      // ATR multiplier for SL (1.2–1.8 fo
 input double   InpTP1_ATR     = 1.5;      // TP1: close 50% at this ATR profit
 input double   InpHardTP_ATR  = 0.0;      // Hard TP safety net (ATR multiplier, 0 = disabled)
 input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing (loose for runners)
-input int      InpStartHour   = 10;       // Trade window start hour (London/NY overlap, GMT+2)
-input int      InpEndHour     = 19;       // Trade window end hour, exclusive (GMT+2)
+input int      InpStartHour   = 9;        // Trade window start hour (early London, GMT+2)
+input int      InpEndHour     = 20;       // Trade window end hour, exclusive (late NY, GMT+2)
 input int      InpStallBars   = 6;        // Close stalled trade after this many bars
 input double   InpStallMinATR = 0.15;    // Min ATR profit required within stall window
 input int      InpLoserBars   = 3;       // Close if profit < 0 after this many bars (0 = disabled)
@@ -31,13 +31,13 @@ input int      InpADXPeriod   = 14;       // ADX period
 input int      InpRSIPeriod   = 14;       // RSI period
 
 //--- Inputs: RSI Confirmation
-input bool     InpUseRSIFilter   = true;  // Enable RSI confirmation filter
+input bool     InpUseRSIFilter   = false; // Enable RSI confirmation filter (disabled for max aggression)
 input double   InpRSIOversold    = 35.0;  // RSI below this = oversold (allow BUY)
 input double   InpRSIOverbought  = 65.0;  // RSI above this = overbought (allow SELL)
 
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
-input double   InpMaxSpreadPts = 50.0;    // Max allowed spread in points
+input double   InpMaxSpreadPts = 80.0;    // Max allowed spread in points (gold spikes normal)
 
 //--- Inputs: Daily Loss Limit
 input bool     InpUseDailyLossLimit  = true;  // Enable max daily loss stop
