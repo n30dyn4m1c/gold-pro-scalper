@@ -15,8 +15,8 @@ input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
 input double   InpATRStop     = 2.0;      // ATR multiplier for SL (1.5–2.5)
 input double   InpTrailingATR = 1.5;      // ATR multiplier for trailing
-input int      InpStartHour   = 10;       // Trade window start hour
-input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
+input int      InpStartHour   = 15;       // Trade window start hour (London/NY overlap, GMT+2)
+input int      InpEndHour     = 19;       // Trade window end hour, exclusive (GMT+2)
 input int      InpMagic       = 777333;   // Magic number
 
 //--- Inputs: Indicators
