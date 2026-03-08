@@ -14,9 +14,9 @@ input double   InpEntryZ      = 2.2;      // Z-Score entry threshold (2.0–2.5 
 input int      InpADXFilter   = 25;       // ADX range filter (allows mild trends)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
 input double   InpATRStop     = 1.5;      // ATR multiplier for SL (1.2–1.8 for M5 gold)
-input double   InpTP1_ATR     = 1.0;      // TP1: close 50% at this ATR profit
+input double   InpTP1_ATR     = 1.5;      // TP1: close 50% at this ATR profit
 input double   InpHardTP_ATR  = 0.0;      // Hard TP safety net (ATR multiplier, 0 = disabled)
-input double   InpTrailingATR = 1.5;      // ATR multiplier for trailing
+input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing (loose for runners)
 input int      InpStartHour   = 10;       // Trade window start hour (London/NY overlap, GMT+2)
 input int      InpEndHour     = 19;       // Trade window end hour, exclusive (GMT+2)
 input int      InpStallBars   = 8;        // Close stalled trade after this many bars
