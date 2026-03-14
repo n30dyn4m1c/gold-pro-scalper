@@ -11,7 +11,8 @@
 //=== SHARED INPUTS ===
 input string   _shared_         = "=== SHARED SETTINGS ===";
 input string   TradeSymbol      = "GOLD";
-input double   InpRiskPct       = 10.0;     // Risk % per trade (each strategy)
+input double   InpRiskPct       = 10.0;     // Risk % per trade (Mean Reversion)
+input double   InpTBRiskPct     = 3.0;      // Risk % per trade (Trend Breakout)
 input int      InpStartHour     = 1;        // Trade window start hour
 input int      InpEndHour       = 22;       // Trade window end hour (exclusive)
 input int      InpSlippage      = 30;       // Max slippage in points
@@ -30,12 +31,13 @@ input int      InpMRMagic       = 777333;   // Magic number (Mean Reversion)
 //=== TREND BREAKOUT INPUTS ===
 input string   _breakout_       = "=== TREND BREAKOUT ===";
 input bool     InpUseBreakout   = true;     // Enable Trend Breakout strategy
-input int      InpDonchianPeriod = 20;      // Donchian Channel lookback (bars)
-input int      InpTBAdxThreshold = 25;      // ADX above this = trending
-input double   InpTBATRStop     = 2.0;      // ATR multiplier for SL
+input int      InpDonchianPeriod = 30;      // Donchian Channel lookback (bars)
+input int      InpTBAdxThreshold = 30;      // ADX above this = trending
+input double   InpTBATRStop     = 2.5;      // ATR multiplier for SL (wider stop, smaller size)
 input double   InpTBTrailingATR = 2.0;      // ATR multiplier for trailing (wider for trends)
 input int      InpEMAPeriod     = 50;       // EMA for trend direction confirmation
-input int      InpCooldownBars  = 5;        // Bars to wait after loss before re-entry
+input int      InpCooldownBars  = 10;       // Bars to wait after loss before re-entry
+input double   InpMinDISpread   = 5.0;      // Min DI+/DI- spread for entry
 input int      InpTBMagic       = 777444;   // Magic number (Trend Breakout)
 
 //=== SHARED INDICATOR INPUTS ===
@@ -437,11 +439,12 @@ void ScaleOutHalf() {
 //+------------------------------------------------------------------+
 //  EXECUTE TRADE (shared, parameterized)
 //+------------------------------------------------------------------+
-void OpenTrade(ENUM_ORDER_TYPE type, double p, double a, double atrStopMult, int magic, string comment) {
+void OpenTrade(ENUM_ORDER_TYPE type, double p, double a, double atrStopMult, int magic, string comment, double riskPct = 0) {
    MqlTradeRequest req = {}; MqlTradeResult res = {};
    double slD = a * atrStopMult;
    double sl = (type == ORDER_TYPE_BUY) ? (p - slD) : (p + slD);
-   double risk = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPct / 100.0);
+   if(riskPct <= 0) riskPct = InpRiskPct;
+   double risk = AccountInfoDouble(ACCOUNT_BALANCE) * (riskPct / 100.0);
    double tickV = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_VALUE);
    double tickS = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_SIZE);
 
@@ -582,21 +585,22 @@ void OnTick() {
                   bool isTrending = (adx[0] >= InpTBAdxThreshold);
                   bool volOk = IsVolOkForBreakout(atr[0]);
 
-                  if(inWindow && isTrending && spreadOk && volOk && !nearNews) {
+                  double diSpread = MathAbs(diPlus[0] - diMinus[0]);
+                  if(inWindow && isTrending && spreadOk && volOk && !nearNews && diSpread >= InpMinDISpread) {
                      // LONG breakout: price above Donchian high, DI+ > DI-, price above EMA
                      if(ask > donchHigh && diPlus[0] > diMinus[0] && bid > ema[0]) {
                         string comment = "TB B|ADX" + DoubleToString(adx[0], 0)
-                                       + "|DH" + DoubleToString(donchHigh, 1)
-                                       + "|DL" + DoubleToString(donchLow, 1);
-                        OpenTrade(ORDER_TYPE_BUY, ask, atr[0], InpTBATRStop, InpTBMagic, comment);
+                                       + "|DI" + DoubleToString(diSpread, 1)
+                                       + "|DH" + DoubleToString(donchHigh, 1);
+                        OpenTrade(ORDER_TYPE_BUY, ask, atr[0], InpTBATRStop, InpTBMagic, comment, InpTBRiskPct);
                         barsSinceClose = 999;
                      }
                      // SHORT breakout: price below Donchian low, DI- > DI+, price below EMA
                      else if(bid < donchLow && diMinus[0] > diPlus[0] && ask < ema[0]) {
                         string comment = "TB S|ADX" + DoubleToString(adx[0], 0)
-                                       + "|DH" + DoubleToString(donchHigh, 1)
+                                       + "|DI" + DoubleToString(diSpread, 1)
                                        + "|DL" + DoubleToString(donchLow, 1);
-                        OpenTrade(ORDER_TYPE_SELL, bid, atr[0], InpTBATRStop, InpTBMagic, comment);
+                        OpenTrade(ORDER_TYPE_SELL, bid, atr[0], InpTBATRStop, InpTBMagic, comment, InpTBRiskPct);
                         barsSinceClose = 999;
                      }
                   }
