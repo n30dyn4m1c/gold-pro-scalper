@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                       XAU_Quant_Reversion.mq5    |
-//|                                  Copyright 2026, Gemini Quant Lab |
+//|                                     Copyright 2026, n30dyn4m1c  |
 //+------------------------------------------------------------------+
 #property strict
-#property copyright "Copyright 2026, Gemini Quant Lab"
+#property copyright "Copyright 2026, n30dyn4m1c"
 #property link      ""
 #property version   "5.00"
-#property description "XAU Quant Reversion - Mean Reversion Z-Score EA"
+#property description "N30 Gold Reversion - Mean Reversion Z-Score EA"
 
 //--- Inputs: Strategy
 input string   TradeSymbol    = "GOLD";
@@ -261,7 +261,7 @@ void CloseAllOwnPositions(string reason) {
       req.price    = (req.type == ORDER_TYPE_SELL) ? SymbolInfoDouble(TradeSymbol, SYMBOL_BID)
                                                    : SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
       req.deviation = InpSlippage;
-      req.comment  = "GQS " + reason;
+      req.comment  = "N30 " + reason;
       uint fill = (uint)SymbolInfoInteger(TradeSymbol, SYMBOL_FILLING_MODE);
       req.type_filling = (fill & SYMBOL_FILLING_FOK) ? ORDER_FILLING_FOK : ORDER_FILLING_IOC;
 
@@ -296,7 +296,7 @@ void OnTick() {
    // --- DAILY LOSS: close everything and stop ---
    if(lossLimitHit) {
       if(SelectOwnPosition()) CloseAllOwnPositions("daily loss limit");
-      Comment("--- XAU QUANT REVERSION v5 ---\n",
+      Comment("--- N30 GOLD REVERSION v5 ---\n",
               "DAILY LOSS LIMIT REACHED - TRADING STOPPED\n",
               "Loss: ", DoubleToString(((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0, 2), "%");
       return;
@@ -331,7 +331,7 @@ void OnTick() {
 
    double dailyLossPct = ((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0;
 
-   Comment("--- XAU QUANT REVERSION v5 ---\n",
+   Comment("--- N30 GOLD REVERSION v5 ---\n",
            "Z-Score: ", DoubleToString(zScore, 2), "\n",
            "ADX: ", DoubleToString(adx[0], 1), "\n",
            "ATR: ", DoubleToString(atr[0], 2), "\n",
@@ -395,7 +395,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, doubl
    int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
 
    string dir = (type == ORDER_TYPE_BUY) ? "B" : "S";
-   string comment = "GQS " + dir
+   string comment = "N30 " + dir
                    + "|Z" + DoubleToString(zScore, 2)
                    + "|A" + DoubleToString(adxVal, 0)
                    + "|R" + DoubleToString(a, 2);
