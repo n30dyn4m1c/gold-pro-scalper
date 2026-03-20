@@ -13,9 +13,9 @@ input string   TradeSymbol    = "GOLD";
 input double   InpEntryZ      = 2.4;      // Z-Score entry threshold (1.8–2.5)
 input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
-input double   InpATRStop     = 2.0;      // ATR multiplier for SL (1.5–2.5)
-input double   InpATRTP       = 4.0;      // ATR multiplier for hard TP (server-side safety net)
-input double   InpTrailingATR = 1.5;      // ATR multiplier for trailing
+input double   InpATRStop     = 2.5;      // ATR multiplier for SL (wider room for gold whipsaws)
+input double   InpATRTP       = 2.5;      // ATR multiplier for hard TP (reachable mean-reversion target)
+input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing (won't choke winners early)
 input int      InpStartHour   = 10;       // Trade window start hour
 input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
 input int      InpMagic       = 777333;   // Magic number
