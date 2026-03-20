@@ -13,9 +13,10 @@ input string   TradeSymbol    = "GOLD";
 input double   InpEntryZ      = 2.4;      // Z-Score entry threshold (1.8–2.5)
 input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
 input double   InpRiskPct     = 10.0;     // Risk % per trade
-input double   InpATRStop     = 2.5;      // ATR multiplier for SL (wider room for gold whipsaws)
-input double   InpATRTP       = 2.5;      // ATR multiplier for hard TP (reachable mean-reversion target)
-input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing (won't choke winners early)
+input double   InpSLPoints    = 800;      // Fixed SL in points (survives gold spikes)
+input double   InpHardTPPoints = 1500;    // Hard TP in points (server-side safety net, wide)
+input double   InpExitZ       = 0.3;      // Z-Score exit threshold (close when Z returns near 0)
+input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing
 input int      InpStartHour   = 10;       // Trade window start hour
 input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
 input int      InpMagic       = 777333;   // Magic number
@@ -307,12 +308,23 @@ void OnTick() {
       CloseAllOwnPositions("(red folder) high-impact news imminent");
    }
 
-   // --- POSITION MANAGEMENT: trail on new bar only ---
+   // --- POSITION MANAGEMENT ---
    if(SelectOwnPosition()) {
-      datetime curBar = iTime(TradeSymbol, _Period, 0);
-      if(curBar != lastTrailBar) {
-         lastTrailBar = curBar;
-         HandleTrailingStop(atr[0]);
+      // Z-Score TP: close when price reverts to mean
+      long posType = PositionGetInteger(POSITION_TYPE);
+      bool zRevert = false;
+      if(posType == POSITION_TYPE_BUY && zScore >= -InpExitZ) zRevert = true;   // bought low, Z back near 0
+      if(posType == POSITION_TYPE_SELL && zScore <= InpExitZ) zRevert = true;    // sold high, Z back near 0
+
+      if(zRevert) {
+         CloseAllOwnPositions("Z-Score TP (Z=" + DoubleToString(zScore, 2) + ")");
+      } else {
+         // Trail on new bar only
+         datetime curBar = iTime(TradeSymbol, _Period, 0);
+         if(curBar != lastTrailBar) {
+            lastTrailBar = curBar;
+            HandleTrailingStop(atr[0]);
+         }
       }
    } else {
       // --- ENTRY LOGIC ---
@@ -377,8 +389,9 @@ void ModifySL(double nSL, double currentTP) {
 //+------------------------------------------------------------------+
 void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, double adxVal) {
    MqlTradeRequest req = {}; MqlTradeResult res = {};
-   double slD = a * InpATRStop;
-   double tpD = a * InpATRTP;
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   double slD = InpSLPoints * point;
+   double tpD = InpHardTPPoints * point;
    double sl = (type == ORDER_TYPE_BUY) ? (p - slD) : (p + slD);
    double tp = (type == ORDER_TYPE_BUY) ? (p + tpD) : (p - tpD);
    double risk = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPct / 100.0);
@@ -416,7 +429,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, doubl
    if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
       Print("Entry failed: retcode=", res.retcode, " comment=", res.comment);
    } else {
-      Print("Trade opened: ", EnumToString(type), " ", lot, " lots, SL=", NormalizeDouble(sl, digits), " TP=", NormalizeDouble(tp, digits));
+      Print("Trade opened: ", EnumToString(type), " ", lot, " lots, SL=", NormalizeDouble(sl, digits), " TP(hard)=", NormalizeDouble(tp, digits), " exitZ=", InpExitZ);
    }
 }
 //+------------------------------------------------------------------+
