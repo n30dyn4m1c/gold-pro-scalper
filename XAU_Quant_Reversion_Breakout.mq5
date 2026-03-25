@@ -262,7 +262,7 @@ bool IsNearNews() {
    MqlDateTime dtNow, dtLast;
    TimeToStruct(TimeCurrent(), dtNow);
    TimeToStruct(lastNewsLoad, dtLast);
-   if(dtNow.day != dtLast.day) LoadNewsEvents();
+   if(dtNow.day_of_year != dtLast.day_of_year) LoadNewsEvents();
 
    datetime now = TimeCurrent();
    for(int i = 0; i < newsRedCount; i++) {
@@ -618,7 +618,7 @@ void OnTick() {
          if(posType == POSITION_TYPE_BUY && zScore >= -InpExitZ) zRevert = true;
          if(posType == POSITION_TYPE_SELL && zScore <= InpExitZ) zRevert = true;
 
-         if(alreadyPartial && zRevert) {
+         if(zRevert) {
             ClosePositionsByMagic(InpMRMagic, "MR Z-TP (Z=" + DoubleToString(zScore, 2) + ")");
          } else {
             // Trailing stop (new bar only)

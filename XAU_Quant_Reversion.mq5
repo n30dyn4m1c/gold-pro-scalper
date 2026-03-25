@@ -180,7 +180,7 @@ bool IsNearNews() {
    MqlDateTime dtNow, dtLast;
    TimeToStruct(TimeCurrent(), dtNow);
    TimeToStruct(lastNewsLoad, dtLast);
-   if(dtNow.day != dtLast.day) LoadNewsEvents();
+   if(dtNow.day_of_year != dtLast.day_of_year) LoadNewsEvents();
 
    datetime now = TimeCurrent();
    for(int i = 0; i < newsRedCount; i++) {
