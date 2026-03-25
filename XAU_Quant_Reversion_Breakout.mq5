@@ -11,19 +11,24 @@
 //=== SHARED INPUTS ===
 input string   _shared_         = "=== SHARED SETTINGS ===";
 input string   TradeSymbol      = "GOLD";
-input double   InpRiskPct       = 10.0;     // Risk % per trade (Mean Reversion)
-input double   InpTBRiskPct     = 3.0;      // Risk % per trade (Trend Breakout)
+input bool     InpUseDynamicRisk = true;    // Enable equity-based risk tiers
+input double   InpRiskPct       = 10.0;     // Risk % per trade (Mean Reversion, when dynamic off)
+input double   InpTBRiskPct     = 3.0;      // Risk % per trade (Trend Breakout, when dynamic off)
 input int      InpStartHour     = 10;        // Trade window start hour
 input int      InpEndHour       = 20;       // Trade window end hour (exclusive)
 input int      InpSlippage      = 30;       // Max slippage in points
 input double   InpMaxSpreadPts  = 50.0;     // Max allowed spread in points
+input int      InpMaxMRPositions = 1;       // Max Mean Reversion positions
+input int      InpMaxTBPositions = 1;       // Max Trend Breakout positions
 
 //=== MEAN REVERSION INPUTS ===
 input string   _reversion_      = "=== MEAN REVERSION ===";
 input bool     InpUseReversion  = true;     // Enable Mean Reversion strategy
 input double   InpEntryZ        = 2.4;      // Z-Score entry threshold
+input double   InpExitZ         = 0.3;      // Z-Score exit threshold (close when Z returns near 0)
 input int      InpMRAdxFilter   = 20;       // ADX below this = ranging
-input double   InpMRATRStop     = 2.0;      // ATR multiplier for SL
+input double   InpMRSLPoints    = 800;      // Fixed SL in points (survives gold spikes)
+input double   InpMRHardTPPoints = 1500;    // Hard TP in points (server-side safety net)
 input double   InpMRTrailingATR = 1.5;      // ATR multiplier for trailing
 input int      InpMAPeriod      = 20;       // MA / StdDev period
 input int      InpMRMagic       = 777333;   // Magic number (Mean Reversion)
@@ -33,7 +38,8 @@ input string   _breakout_       = "=== TREND BREAKOUT ===";
 input bool     InpUseBreakout   = true;     // Enable Trend Breakout strategy
 input int      InpDonchianPeriod = 30;      // Donchian Channel lookback (bars)
 input int      InpTBAdxThreshold = 30;      // ADX above this = trending
-input double   InpTBATRStop     = 2.5;      // ATR multiplier for SL (wider stop, smaller size)
+input double   InpTBSLPoints    = 1000;     // Fixed SL in points (wider for trends)
+input double   InpTBHardTPPoints = 2000;    // Hard TP in points (server-side safety net)
 input double   InpTBTrailingATR = 2.0;      // ATR multiplier for trailing (wider for trends)
 input int      InpEMAPeriod     = 50;       // EMA for trend direction confirmation
 input int      InpCooldownBars  = 10;       // Bars to wait after loss before re-entry
@@ -68,9 +74,11 @@ int handleMA, handleSD, handleATR, handleADX, handleATR50, handleEMA;
 
 //--- Mean Reversion state
 string partialTag = "_P1";
+datetime lastMRTrailBar = 0;
 
 //--- Trend Breakout state
 datetime lastBarTime = 0;
+datetime lastTBTrailBar = 0;
 int barsSinceClose = 999;
 
 //--- News schedule: red folder (CALENDAR_IMPORTANCE_HIGH) only
@@ -125,6 +133,41 @@ void OnDeinit(const int reason) {
 //+------------------------------------------------------------------+
 //  SHARED UTILITIES
 //+------------------------------------------------------------------+
+string TruncateComment(string comment, int maxLen = 31) {
+   if(StringLen(comment) <= maxLen) return comment;
+   return StringSubstr(comment, 0, maxLen);
+}
+
+//+------------------------------------------------------------------+
+//  Dynamic Risk Tiers — scales risk down as equity grows
+//+------------------------------------------------------------------+
+double GetRiskPct(bool isTrendBreakout = false) {
+   if(!InpUseDynamicRisk) return isTrendBreakout ? InpTBRiskPct : InpRiskPct;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double baseRisk;
+   if(equity < 500)        baseRisk = 10.0;
+   else if(equity < 2000)  baseRisk = 7.0;
+   else if(equity < 5000)  baseRisk = 5.0;
+   else if(equity < 20000) baseRisk = 3.0;
+   else                    baseRisk = 1.5;
+
+   // Trend breakout uses ~30% of MR risk (more conservative for trends)
+   return isTrendBreakout ? baseRisk * 0.3 : baseRisk;
+}
+
+double GetDailyLossLimitPct() {
+   if(!InpUseDynamicRisk) return InpMaxDailyLossPct;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity < 500)        return 25.0;
+   if(equity < 2000)       return 20.0;
+   if(equity < 5000)       return 15.0;
+   if(equity < 20000)      return 10.0;
+   return 7.0;
+}
+
+//+------------------------------------------------------------------+
 void CheckDailyReset() {
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
    if(dt.day_of_year != dailyStartDay) {
@@ -142,9 +185,10 @@ bool IsDailyLossLimitHit() {
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double lossPercent = ((dailyStartBalance - equity) / dailyStartBalance) * 100.0;
 
-   if(lossPercent >= InpMaxDailyLossPct) {
+   double dailyLimit = GetDailyLossLimitPct();
+   if(lossPercent >= dailyLimit) {
       dailyLossHit = true;
-      Print("DAILY LOSS LIMIT HIT: ", DoubleToString(lossPercent, 2), "% lost. Trading stopped.");
+      Print("DAILY LOSS LIMIT HIT: ", DoubleToString(lossPercent, 2), "% lost (limit ", DoubleToString(dailyLimit, 1), "%). Trading stopped.");
       return true;
    }
    return false;
@@ -260,6 +304,19 @@ bool SelectPositionByMagic(int magic) {
       }
    }
    return false;
+}
+
+int CountPositionsByMagic(int magic) {
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) == TradeSymbol &&
+         PositionGetInteger(POSITION_MAGIC) == magic) {
+         count++;
+      }
+   }
+   return count;
 }
 
 bool IsPartialClosed() {
@@ -409,11 +466,15 @@ void ScaleOutHalf() {
 //+------------------------------------------------------------------+
 //  EXECUTE TRADE (shared, parameterized)
 //+------------------------------------------------------------------+
-void OpenTrade(ENUM_ORDER_TYPE type, double p, double a, double atrStopMult, int magic, string comment, double riskPct = 0) {
+void OpenTrade(ENUM_ORDER_TYPE type, double p, double slPoints, double tpPoints, int magic, string comment, bool isTrendBreakout = false) {
    MqlTradeRequest req = {}; MqlTradeResult res = {};
-   double slD = a * atrStopMult;
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   double slD = slPoints * point;
+   double tpD = tpPoints * point;
    double sl = (type == ORDER_TYPE_BUY) ? (p - slD) : (p + slD);
-   if(riskPct <= 0) riskPct = InpRiskPct;
+   double tp = (type == ORDER_TYPE_BUY) ? (p + tpD) : (p - tpD);
+
+   double riskPct = GetRiskPct(isTrendBreakout);
    double risk = AccountInfoDouble(ACCOUNT_BALANCE) * (riskPct / 100.0);
    double tickV = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_VALUE);
    double tickS = SymbolInfoDouble(TradeSymbol, SYMBOL_TRADE_TICK_SIZE);
@@ -434,15 +495,16 @@ void OpenTrade(ENUM_ORDER_TYPE type, double p, double a, double atrStopMult, int
    req.price        = p;
    req.magic        = magic;
    req.sl           = NormalizeDouble(sl, digits);
+   req.tp           = NormalizeDouble(tp, digits);
    req.deviation    = InpSlippage;
-   req.comment      = comment;
+   req.comment      = TruncateComment(comment);
    uint fill = (uint)SymbolInfoInteger(TradeSymbol, SYMBOL_FILLING_MODE);
    req.type_filling = (fill & SYMBOL_FILLING_FOK) ? ORDER_FILLING_FOK : ORDER_FILLING_IOC;
 
    if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
       Print("Entry failed: retcode=", res.retcode, " comment=", res.comment);
    } else {
-      Print("Trade opened: ", comment, " ", lot, " lots, SL=", NormalizeDouble(sl, digits));
+      Print("Trade opened: ", comment, " ", lot, " lots, SL=", NormalizeDouble(sl, digits), " TP(hard)=", NormalizeDouble(tp, digits));
    }
 }
 
@@ -503,6 +565,7 @@ void OnTick() {
       if(SelectPositionByMagic(InpMRMagic)) {
          // Position management
          bool alreadyPartial = IsPartialClosed();
+         ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
          // Scale out 50% at mean (Z near 0)
          if(!alreadyPartial && MathAbs(zScore) < 0.2) {
@@ -510,12 +573,27 @@ void OnTick() {
             Print("MR: TP1 Hit: 50% Closed. SL to Breakeven.");
          }
 
-         // Trailing stop
-         TrailStop(atr[0], InpMRTrailingATR);
+         // Z-Score TP: close remaining when price fully reverts to mean
+         bool zRevert = false;
+         if(posType == POSITION_TYPE_BUY && zScore >= -InpExitZ) zRevert = true;
+         if(posType == POSITION_TYPE_SELL && zScore <= InpExitZ) zRevert = true;
+
+         if(alreadyPartial && zRevert) {
+            ClosePositionsByMagic(InpMRMagic, "MR Z-TP (Z=" + DoubleToString(zScore, 2) + ")");
+         } else {
+            // Trailing stop (new bar only)
+            datetime curBar = iTime(TradeSymbol, _Period, 0);
+            if(curBar != lastMRTrailBar) {
+               lastMRTrailBar = curBar;
+               TrailStop(atr[0], InpMRTrailingATR);
+            }
+         }
       } else {
          // Entry logic
          bool isRanging = (adx[0] < InpMRAdxFilter);
          bool volOk = IsVolOkForReversion(atr[0]);
+
+         if(CountPositionsByMagic(InpMRMagic) >= InpMaxMRPositions) return;  // max positions limit
 
          if(inWindow && isRanging && spreadOk && volOk && !nearNews && MathAbs(zScore) > InpEntryZ) {
             string dir = (zScore < 0) ? "B" : "S";
@@ -525,9 +603,9 @@ void OnTick() {
                            + "|R" + DoubleToString(atr[0], 2);
 
             if(zScore < 0)
-               OpenTrade(ORDER_TYPE_BUY, ask, atr[0], InpMRATRStop, InpMRMagic, comment);
+               OpenTrade(ORDER_TYPE_BUY, ask, InpMRSLPoints, InpMRHardTPPoints, InpMRMagic, comment, false);
             else
-               OpenTrade(ORDER_TYPE_SELL, bid, atr[0], InpMRATRStop, InpMRMagic, comment);
+               OpenTrade(ORDER_TYPE_SELL, bid, InpMRSLPoints, InpMRHardTPPoints, InpMRMagic, comment, false);
          }
       }
    }
@@ -537,8 +615,12 @@ void OnTick() {
    //=================================================================
    if(InpUseBreakout) {
       if(SelectPositionByMagic(InpTBMagic)) {
-         // Position management: trailing stop
-         TrailStop(atr[0], InpTBTrailingATR);
+         // Position management: trailing stop (new bar only)
+         datetime curBar = iTime(TradeSymbol, _Period, 0);
+         if(curBar != lastTBTrailBar) {
+            lastTBTrailBar = curBar;
+            TrailStop(atr[0], InpTBTrailingATR);
+         }
       } else {
          // Entry only on new bar
          datetime currentBar[];
@@ -552,6 +634,8 @@ void OnTick() {
                double donchLow  = DonchianLow(InpDonchianPeriod);
 
                if(donchHigh != 0 && donchLow != 0) {
+                  if(CountPositionsByMagic(InpTBMagic) >= InpMaxTBPositions) return;  // max positions limit
+
                   bool isTrending = (adx[0] >= InpTBAdxThreshold);
                   bool volOk = IsVolOkForBreakout(atr[0]);
 
@@ -562,7 +646,7 @@ void OnTick() {
                         string comment = "TB B|ADX" + DoubleToString(adx[0], 0)
                                        + "|DI" + DoubleToString(diSpread, 1)
                                        + "|DH" + DoubleToString(donchHigh, 1);
-                        OpenTrade(ORDER_TYPE_BUY, ask, atr[0], InpTBATRStop, InpTBMagic, comment, InpTBRiskPct);
+                        OpenTrade(ORDER_TYPE_BUY, ask, InpTBSLPoints, InpTBHardTPPoints, InpTBMagic, comment, true);
                         barsSinceClose = 999;
                      }
                      // SHORT breakout: price below Donchian low, DI- > DI+, price below EMA
@@ -570,7 +654,7 @@ void OnTick() {
                         string comment = "TB S|ADX" + DoubleToString(adx[0], 0)
                                        + "|DI" + DoubleToString(diSpread, 1)
                                        + "|DL" + DoubleToString(donchLow, 1);
-                        OpenTrade(ORDER_TYPE_SELL, bid, atr[0], InpTBATRStop, InpTBMagic, comment, InpTBRiskPct);
+                        OpenTrade(ORDER_TYPE_SELL, bid, InpTBSLPoints, InpTBHardTPPoints, InpTBMagic, comment, true);
                         barsSinceClose = 999;
                      }
                   }
@@ -588,8 +672,10 @@ void OnTick() {
    bool hasTB = SelectPositionByMagic(InpTBMagic);
 
    Comment("--- GOLD DUAL STRATEGY ---\n",
+           "Equity: $", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2), "\n",
+           "MR Risk: ", DoubleToString(GetRiskPct(false), 1), "% | TB Risk: ", DoubleToString(GetRiskPct(true), 1), "% | DLL: ", DoubleToString(GetDailyLossLimitPct(), 1), "%\n",
            "== Mean Reversion ", (InpUseReversion ? (hasMR ? "[IN TRADE]" : "[scanning]") : "[OFF]"), " ==\n",
-           "  Z-Score: ", DoubleToString(zScore, 2), " (entry >", DoubleToString(InpEntryZ, 1), ")\n",
+           "  Z-Score: ", DoubleToString(zScore, 2), " (entry >", DoubleToString(InpEntryZ, 1), ", exit <", DoubleToString(InpExitZ, 1), ")\n",
            "== Trend Breakout ", (InpUseBreakout ? (hasTB ? "[IN TRADE]" : "[scanning]") : "[OFF]"), " ==\n",
            "  Donch Hi: ", DoubleToString(donchH, 2), "  Lo: ", DoubleToString(donchL, 2), "\n",
            "  EMA50: ", DoubleToString(ema[0], 2), "\n",
@@ -600,6 +686,6 @@ void OnTick() {
            "  ATR: ", DoubleToString(atr[0], 2), "\n",
            "  Spread: ", DoubleToString(spreadPts, 1), " pts\n",
            "  News: ", (nearNews ? "BLOCKED" : "clear"), (redNewsImminent ? " [RED FOLDER CLOSE]" : ""), "\n",
-           "  Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(InpMaxDailyLossPct, 1), "% limit");
+           "  Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(GetDailyLossLimitPct(), 1), "% limit");
 }
 //+------------------------------------------------------------------+

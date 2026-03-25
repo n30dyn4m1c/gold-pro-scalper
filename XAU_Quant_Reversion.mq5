@@ -30,6 +30,7 @@ input int      InpADXPeriod   = 14;       // ADX period
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
 input double   InpMaxSpreadPts = 50.0;    // Max allowed spread in points
+input int      InpMaxPositions = 1;       // Max open positions allowed
 
 //--- Inputs: News Filter (red folder / CALENDAR_IMPORTANCE_HIGH only)
 input bool     InpUseNewsFilter      = true;  // Enable news time filter
@@ -138,7 +139,8 @@ void LoadNewsEvents() {
    datetime dayEnd   = dayStart + 86400;
 
    MqlCalendarValue values[];
-   int total = CalendarValueHistory(values, dayStart, dayEnd);
+   if(!CalendarValueHistory(values, dayStart, dayEnd)) return;
+   int total = ArraySize(values);
 
    for(int i = 0; i < total; i++) {
       MqlCalendarEvent event;
@@ -259,6 +261,12 @@ int CountOwnPositions() {
 }
 
 //+------------------------------------------------------------------+
+string TruncateComment(string comment, int maxLen = 31) {
+   if(StringLen(comment) <= maxLen) return comment;
+   return StringSubstr(comment, 0, maxLen);
+}
+
+//+------------------------------------------------------------------+
 double NormalizeLot(double lot) {
    double minLot  = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MAX);
@@ -355,7 +363,7 @@ void OnTick() {
       }
    } else {
       // --- ENTRY LOGIC ---
-      if(CountOwnPositions() > 0) return;  // guard against race condition
+      if(CountOwnPositions() >= InpMaxPositions) return;  // max positions limit
 
       bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
       bool isRanging = (adx[0] < InpADXFilter);
@@ -406,7 +414,7 @@ void HandleTrailingStop(double atrVal) {
 void ModifySL(double nSL, double currentTP) {
    MqlTradeRequest r = {}; MqlTradeResult rs = {};
    r.action   = TRADE_ACTION_SLTP;
-   r.position = PositionGetInteger(POSITION_TICKET);
+   r.position = (ulong)PositionGetInteger(POSITION_TICKET);
    r.symbol   = TradeSymbol;
    r.sl       = nSL;
    r.tp       = currentTP;
@@ -438,10 +446,10 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, doubl
    int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
 
    string dir = (type == ORDER_TYPE_BUY) ? "B" : "S";
-   string comment = "N30 " + dir
+   string comment = TruncateComment("N30 " + dir
                    + "|Z" + DoubleToString(zScore, 2)
                    + "|A" + DoubleToString(adxVal, 0)
-                   + "|R" + DoubleToString(a, 2);
+                   + "|R" + DoubleToString(a, 2));
 
    req.action       = TRADE_ACTION_DEAL;
    req.symbol       = TradeSymbol;
