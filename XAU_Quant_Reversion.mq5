@@ -11,22 +11,22 @@
 //--- Inputs: Strategy
 input string   InpTradeSymbol = "GOLD";        // Trade symbol (GOLD, XAUUSD, etc.)
 string         TradeSymbol;
-input double   InpEntryZ      = 2.0;      // Z-Score entry threshold (1.8–2.5)
-input int      InpADXFilter   = 30;       // ADX range filter (below = ranging)
+input double   InpEntryZ      = 2.0;      // Z-Score entry threshold
 input bool     InpUseDynamicRisk = true;  // Enable equity-based risk tiers (overrides InpRiskPct)
 input double   InpRiskPct     = 10.0;     // Risk % per trade (used when dynamic risk is off)
 input double   InpSLPoints    = 800;      // Fixed SL in points (survives gold spikes)
 input double   InpHardTPPoints = 1500;    // Hard TP in points (server-side safety net, wide)
-input double   InpExitZ       = 0.3;      // Z-Score exit threshold (close when Z returns near 0)
+input double   InpExitZ       = 0.5;      // Z-Score exit threshold (close when Z returns near 0)
 input double   InpTrailingATR = 2.0;      // ATR multiplier for trailing
 input int      InpStartHour   = 10;       // Trade window start hour
 input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
+input int      InpFridayCloseHour = 20;   // Friday hour to close and stop
+input int      InpMaxHoldMinutes = 30;    // Max trade duration in minutes
 input int      InpMagic       = 777333;   // Magic number
 
 //--- Inputs: Indicators
 input int      InpMAPeriod    = 20;       // MA / StdDev period
 input int      InpATRPeriod   = 14;       // ATR period
-input int      InpADXPeriod   = 14;       // ADX period
 input int      InpFilterPeriodH1 = 50;   // H1 SMA period for trend filter (0 = disabled)
 
 //--- Inputs: Execution
@@ -44,13 +44,8 @@ input bool     InpCloseBeforeNews    = true;  // Close open trades before red-fo
 input bool     InpUseDailyLossLimit  = true;  // Enable max daily loss stop
 input double   InpMaxDailyLossPct    = 20.0;  // Max daily loss % of balance (stops trading)
 
-//--- Inputs: Volatility Filter
-input bool     InpUseVolFilter    = true;  // Enable volatility-adjusted entry
-input double   InpATRMaxMultiple  = 2.0;   // Max ATR vs 50-period avg (skip if exceeded)
-input double   InpATRMinMultiple  = 0.5;   // Min ATR vs 50-period avg (skip if too quiet)
-
 //--- Global Handles & State
-int handleMA, handleSD, handleATR, handleADX, handleATR50, handleMA_H1;
+int handleMA, handleSD, handleATR, handleMA_H1;
 
 //--- News schedule: red folder (CALENDAR_IMPORTANCE_HIGH) only
 #define MAX_NEWS 40
@@ -82,8 +77,6 @@ int OnInit() {
    handleMA    = iMA(TradeSymbol, _Period, InpMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
    handleSD    = iStdDev(TradeSymbol, _Period, InpMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
    handleATR   = iATR(TradeSymbol, _Period, InpATRPeriod);
-   handleADX   = iADX(TradeSymbol, _Period, InpADXPeriod);
-   handleATR50 = iATR(TradeSymbol, _Period, 50);
 
    if(InpFilterPeriodH1 > 0)
       handleMA_H1 = iMA(TradeSymbol, PERIOD_H1, InpFilterPeriodH1, 0, MODE_SMA, PRICE_CLOSE);
@@ -91,8 +84,7 @@ int OnInit() {
       handleMA_H1 = INVALID_HANDLE;
 
    if(handleMA == INVALID_HANDLE || handleSD == INVALID_HANDLE ||
-      handleATR == INVALID_HANDLE || handleADX == INVALID_HANDLE ||
-      handleATR50 == INVALID_HANDLE) {
+      handleATR == INVALID_HANDLE) {
       Print("Failed to create indicator handles");
       return(INIT_FAILED);
    }
@@ -116,8 +108,6 @@ void OnDeinit(const int reason) {
    if(handleMA     != INVALID_HANDLE) IndicatorRelease(handleMA);
    if(handleSD     != INVALID_HANDLE) IndicatorRelease(handleSD);
    if(handleATR    != INVALID_HANDLE) IndicatorRelease(handleATR);
-   if(handleADX    != INVALID_HANDLE) IndicatorRelease(handleADX);
-   if(handleATR50  != INVALID_HANDLE) IndicatorRelease(handleATR50);
    if(handleMA_H1  != INVALID_HANDLE) IndicatorRelease(handleMA_H1);
 }
 
@@ -213,22 +203,6 @@ bool IsRedNewsImminent() {
          return true;
    }
    return false;
-}
-
-//+------------------------------------------------------------------+
-//  Volatility Filter
-//+------------------------------------------------------------------+
-bool IsVolatilityOk(double atrFast) {
-   if(!InpUseVolFilter) return true;
-
-   double atrSlow[1];
-   if(CopyBuffer(handleATR50, 0, 0, 1, atrSlow) < 1) return true;
-   if(atrSlow[0] <= 0) return true;
-
-   double ratio = atrFast / atrSlow[0];
-   if(ratio > InpATRMaxMultiple || ratio < InpATRMinMultiple) return false;
-
-   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -335,6 +309,18 @@ void CloseAllOwnPositions(string reason) {
 }
 
 //+------------------------------------------------------------------+
+//  IsWeekendRisk — block Friday late sessions and weekends
+//+------------------------------------------------------------------+
+bool IsWeekendRisk() {
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   // Friday late (>= InpFridayCloseHour) or Saturday (6) or Sunday (0)
+   if((dt.day_of_week == 5 && dt.hour >= InpFridayCloseHour) || dt.day_of_week == 6 || dt.day_of_week == 0)
+      return true;
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //  H1 Trend Filter — skip M1 entries that fight the H1 structural trend
 //+------------------------------------------------------------------+
 bool IsAlignedWithH1Trend(bool isBuy) {
@@ -352,11 +338,9 @@ bool IsAlignedWithH1Trend(bool isBuy) {
 void OnTick() {
    CheckDailyReset();
 
-   double ma[1], sd[1], atr[1], adx[1];
-   double prevMA[1], prevSD[1];
+   double ma[1], sd[1], atr[1];
    if(CopyBuffer(handleMA,0,0,1,ma)<1 || CopyBuffer(handleSD,0,0,1,sd)<1 ||
-      CopyBuffer(handleATR,0,0,1,atr)<1 || CopyBuffer(handleADX,0,0,1,adx)<1) return;
-   if(CopyBuffer(handleMA,0,1,1,prevMA)<1 || CopyBuffer(handleSD,0,1,1,prevSD)<1) return;
+      CopyBuffer(handleATR,0,0,1,atr)<1) return;
 
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
    double bid   = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
@@ -365,13 +349,11 @@ void OnTick() {
 
    if(sd[0] <= 0.0) return;
 
-   double prevClose     = iClose(TradeSymbol, _Period, 1);
-   double prevZScore    = (prevSD[0] > 0.0) ? (prevClose - prevMA[0]) / prevSD[0] : 0.0;
    double zScore        = (bid - ma[0]) / sd[0];
    bool nearNews        = IsNearNews();
    bool lossLimitHit    = IsDailyLossLimitHit();
    bool redNewsImminent = IsRedNewsImminent();
-   bool volOk           = IsVolatilityOk(atr[0]);
+   bool weekendRisk     = IsWeekendRisk();
 
    // --- Spread Check: block if spread exceeds either the fixed cap OR 100% of ATR (in points) ---
    double spreadPts = (ask - bid) / point;
@@ -380,11 +362,6 @@ void OnTick() {
 
    // --- Pre-compute filter states for Comment display ---
    bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
-   bool isRanging = (adx[0] < InpADXFilter);
-   // Z-Score Hook: price must be at extreme AND Z must be starting to revert (hook forming)
-   bool zBuyHook  = (zScore < -InpEntryZ && zScore > prevZScore);  // Z was more negative, now rising back
-   bool zSellHook = (zScore >  InpEntryZ && zScore < prevZScore);  // Z was more positive, now falling back
-   bool zHook     = (zBuyHook || zSellHook);
 
    string h1Status = "OFF";
    if(InpFilterPeriodH1 > 0 && handleMA_H1 != INVALID_HANDLE) {
@@ -396,9 +373,18 @@ void OnTick() {
    // --- DAILY LOSS: close everything and stop ---
    if(lossLimitHit) {
       if(SelectOwnPosition()) CloseAllOwnPositions("daily loss limit");
-      Comment("--- N30 GOLD REVERSION v5 ---\n",
+      Comment("--- N30 GOLD REVERSION (SIMPLE) ---\n",
               "DAILY LOSS LIMIT REACHED - TRADING STOPPED\n",
               "Loss: ", DoubleToString(((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0, 2), "%");
+      return;
+   }
+
+   // --- FRIDAY EXIT / WEEKEND SAFETY ---
+   if(weekendRisk) {
+      if(SelectOwnPosition()) CloseAllOwnPositions("Friday Exit");
+      Comment("--- N30 GOLD REVERSION (SIMPLE) ---\n",
+              "WEEKEND PAUSE - NO NEW TRADES\n",
+              "H1 Trend: ", h1Status);
       return;
    }
 
@@ -408,52 +394,54 @@ void OnTick() {
    }
 
    // --- POSITION MANAGEMENT ---
+   string tradeDurStr = "None";
    if(SelectOwnPosition()) {
-      // Z-Score TP: close when price reverts to mean
-      long posType = PositionGetInteger(POSITION_TYPE);
-      bool zRevert = false;
-      if(posType == POSITION_TYPE_BUY && zScore >= -InpExitZ) zRevert = true;   // bought low, Z back near 0
-      if(posType == POSITION_TYPE_SELL && zScore <= InpExitZ) zRevert = true;    // sold high, Z back near 0
+      long openTime = PositionGetInteger(POSITION_TIME);
+      long durationSec = TimeCurrent() - openTime;
+      int durMins = (int)(durationSec / 60);
+      int durSecs = (int)(durationSec % 60);
+      tradeDurStr = IntegerToString(durMins) + "m " + IntegerToString(durSecs) + "s";
 
-      if(zRevert) {
-         CloseAllOwnPositions("Z-Score TP (Z=" + DoubleToString(zScore, 2) + ")");
+      // Time-Based Exit
+      if(durMins >= InpMaxHoldMinutes) {
+         CloseAllOwnPositions("Time Exit (" + tradeDurStr + ")");
       } else {
-         // Trail on new bar only
-         datetime curBar = iTime(TradeSymbol, _Period, 0);
-         if(curBar != lastTrailBar) {
-            lastTrailBar = curBar;
-            HandleTrailingStop(atr[0]);
+         // Z-Score TP: close when price reverts to mean
+         long posType = PositionGetInteger(POSITION_TYPE);
+         bool zRevert = false;
+         if(posType == POSITION_TYPE_BUY && zScore >= -InpExitZ) zRevert = true;   // bought low, Z back near 0
+         if(posType == POSITION_TYPE_SELL && zScore <= InpExitZ) zRevert = true;    // sold high, Z back near 0
+
+         if(zRevert) {
+            CloseAllOwnPositions("Z-Score TP (Z=" + DoubleToString(zScore, 2) + ")");
+         } else {
+            // Trail on new bar only
+            datetime curBar = iTime(TradeSymbol, _Period, 0);
+            if(curBar != lastTrailBar) {
+               lastTrailBar = curBar;
+               HandleTrailingStop(atr[0]);
+            }
          }
       }
    } else {
       // --- ENTRY LOGIC ---
       if(CountOwnPositions() >= InpMaxPositions) return;  // max positions limit
 
-      bool baseFilters = (inWindow && isRanging && spreadOk && volOk && !nearNews);
-      if(baseFilters && zBuyHook && IsAlignedWithH1Trend(true))
-         ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore, adx[0]);
-      else if(baseFilters && zSellHook && IsAlignedWithH1Trend(false))
-         ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], zScore, adx[0]);
+      bool baseFilters = (inWindow && spreadOk && !nearNews);
+      if(baseFilters) {
+         if(zScore < -InpEntryZ && IsAlignedWithH1Trend(true))
+            ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore);
+         else if(zScore > InpEntryZ && IsAlignedWithH1Trend(false))
+            ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], zScore);
+      }
    }
 
-   double dailyLossPct = ((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0;
-
-   Comment("--- N30 GOLD REVERSION v5 ---\n",
-           "Equity: $", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
-           " | Risk: ", DoubleToString(GetRiskPct(), 1), "%\n",
-           "Z-Score: ", DoubleToString(zScore, 2), " (prev:", DoubleToString(prevZScore, 2), ")",
-           "  Z-Hook: ", (zBuyHook ? "BUY" : zSellHook ? "SELL" : "wait"), "\n",
-           "ADX: ", DoubleToString(adx[0], 1),
-           "  Ranging: ", (isRanging ? "YES" : "no"), "\n",
-           "ATR: ", DoubleToString(atr[0], 2),
-           "  Vol-Filter: ", (volOk ? "OK" : "BLOCKED"), "\n",
-           "Spread: ", DoubleToString(spreadPts, 1), "pts / ATR100%=", DoubleToString(atrPts, 1),
-           "  ", (spreadOk ? "OK" : "BLOCKED"), "\n",
-           "H1 Trend: ", h1Status,
-           "  Session: ", (inWindow ? "OK" : "closed"), "\n",
+   Comment("--- N30 GOLD REVERSION (SIMPLE) ---\n",
+           "Z-Score: ", DoubleToString(zScore, 2), "\n",
+           "H1 Trend: ", h1Status, "\n",
            "News: ", (nearNews ? "BLOCKED" : "clear"),
            (redNewsImminent ? " [CLOSING NOW]" : ""), "\n",
-           "Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(GetDailyLossLimitPct(), 1), "% DLL");
+           "Trade Duration: ", tradeDurStr);
 }
 
 //+------------------------------------------------------------------+
@@ -489,7 +477,7 @@ void ModifySL(double nSL, double currentTP) {
 }
 
 //+------------------------------------------------------------------+
-void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, double adxVal) {
+void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore) {
    MqlTradeRequest req = {}; MqlTradeResult res = {};
    double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
    double slD = InpSLPoints * point;
@@ -524,7 +512,6 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, doubl
    string dir = (type == ORDER_TYPE_BUY) ? "B" : "S";
    string comment = TruncateComment("N30 " + dir
                    + "|Z" + DoubleToString(zScore, 2)
-                   + "|A" + DoubleToString(adxVal, 0)
                    + "|R" + DoubleToString(a, 2));
 
    req.action       = TRADE_ACTION_DEAL;
