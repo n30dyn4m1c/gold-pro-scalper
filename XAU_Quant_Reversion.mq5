@@ -357,16 +357,43 @@ void OnTick() {
       CopyBuffer(handleATR,0,0,1,atr)<1 || CopyBuffer(handleADX,0,0,1,adx)<1) return;
 
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
-   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   double bid   = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double ask   = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
 
    if(sd[0] <= 0.0) return;
 
-   double zScore = (bid - ma[0]) / sd[0];
-   bool nearNews = IsNearNews();
-   bool lossLimitHit = IsDailyLossLimitHit();
+   double zScore        = (bid - ma[0]) / sd[0];
+   bool nearNews        = IsNearNews();
+   bool lossLimitHit    = IsDailyLossLimitHit();
    bool redNewsImminent = IsRedNewsImminent();
-   bool volOk = IsVolatilityOk(atr[0]);
+   bool volOk           = IsVolatilityOk(atr[0]);
+
+   // --- Enhanced Spread Check: block if spread exceeds either the fixed cap OR 50% of ATR (in points) ---
+   double spreadPts = (ask - bid) / point;
+   double atrPts    = atr[0] / point;
+   bool spreadOk    = (spreadPts <= InpMaxSpreadPts) && (spreadPts <= 0.5 * atrPts);
+
+   // --- Marubozu Filter: skip if last completed M1 candle body > 90% of its total range ---
+   double prevHigh    = iHigh(TradeSymbol, _Period, 1);
+   double prevLow     = iLow(TradeSymbol, _Period, 1);
+   double prevOpen    = iOpen(TradeSymbol, _Period, 1);
+   double prevClose   = iClose(TradeSymbol, _Period, 1);
+   double candleRange = prevHigh - prevLow;
+   double candleBody  = MathAbs(prevClose - prevOpen);
+   bool marubozuBlock = (candleRange > 0 && (candleBody / candleRange) > 0.90);
+
+   // --- Pre-compute filter states for Comment display ---
+   bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
+   bool isRanging = (adx[0] < InpADXFilter);
+   bool zHook     = (MathAbs(zScore) > InpEntryZ);
+
+   string h1Status = "OFF";
+   if(InpFilterPeriodH1 > 0 && handleMA_H1 != INVALID_HANDLE) {
+      double h1ma[1];
+      if(CopyBuffer(handleMA_H1, 0, 0, 1, h1ma) >= 1)
+         h1Status = (bid > h1ma[0]) ? "BULL" : "BEAR";
+   }
 
    // --- DAILY LOSS: close everything and stop ---
    if(lossLimitHit) {
@@ -404,12 +431,7 @@ void OnTick() {
       // --- ENTRY LOGIC ---
       if(CountOwnPositions() >= InpMaxPositions) return;  // max positions limit
 
-      bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
-      bool isRanging = (adx[0] < InpADXFilter);
-      double spreadPts = (ask - bid) / SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
-      bool spreadOk  = (spreadPts <= InpMaxSpreadPts);
-
-      if(inWindow && isRanging && spreadOk && volOk && !nearNews && MathAbs(zScore) > InpEntryZ) {
+      if(inWindow && isRanging && spreadOk && volOk && !nearNews && !marubozuBlock && zHook) {
          if(zScore < 0 && IsAlignedWithH1Trend(true))
             ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore, adx[0]);
          else if(zScore > 0 && IsAlignedWithH1Trend(false))
@@ -418,18 +440,25 @@ void OnTick() {
    }
 
    double dailyLossPct = ((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0;
+   double bodyPct      = (candleRange > 0) ? (candleBody / candleRange) * 100.0 : 0.0;
 
    Comment("--- N30 GOLD REVERSION v5 ---\n",
-           "Equity: $", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2), "\n",
-           "Risk: ", DoubleToString(GetRiskPct(), 1), "% | DLL: ", DoubleToString(GetDailyLossLimitPct(), 1), "%\n",
-           "Z-Score: ", DoubleToString(zScore, 2), "\n",
-           "ADX: ", DoubleToString(adx[0], 1), "\n",
-           "ATR: ", DoubleToString(atr[0], 2), "\n",
-           "Spread: ", DoubleToString((ask-bid)/SymbolInfoDouble(TradeSymbol,SYMBOL_POINT), 1), " pts\n",
-           "News Block: ", (nearNews ? "YES" : "no"),
-           (redNewsImminent ? " [RED FOLDER CLOSE]" : ""), "\n",
-           "Vol Filter: ", (volOk ? "OK" : "BLOCKED"), "\n",
-           "Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(GetDailyLossLimitPct(), 1), "% limit");
+           "Equity: $", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
+           " | Risk: ", DoubleToString(GetRiskPct(), 1), "%\n",
+           "Z-Score: ", DoubleToString(zScore, 2),
+           "  Z-Hook: ", (zHook ? "OK" : "wait"), "\n",
+           "ADX: ", DoubleToString(adx[0], 1),
+           "  Ranging: ", (isRanging ? "YES" : "no"), "\n",
+           "ATR: ", DoubleToString(atr[0], 2),
+           "  Vol-Filter: ", (volOk ? "OK" : "BLOCKED"), "\n",
+           "Spread: ", DoubleToString(spreadPts, 1), "pts / ATR50%=", DoubleToString(0.5 * atrPts, 1),
+           "  ", (spreadOk ? "OK" : "BLOCKED"), "\n",
+           "H1 Trend: ", h1Status,
+           "  Session: ", (inWindow ? "OK" : "closed"), "\n",
+           "Marubozu: ", (marubozuBlock ? "BLOCKED(" + DoubleToString(bodyPct, 0) + "%)" : "OK"), "\n",
+           "News: ", (nearNews ? "BLOCKED" : "clear"),
+           (redNewsImminent ? " [CLOSING NOW]" : ""), "\n",
+           "Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(GetDailyLossLimitPct(), 1), "% DLL");
 }
 
 //+------------------------------------------------------------------+
@@ -525,3 +554,4 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore, doubl
    }
 }
 //+------------------------------------------------------------------+
+// This work is my worship unto GOD
