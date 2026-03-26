@@ -27,6 +27,7 @@ input int      InpMagic       = 777333;   // Magic number
 input int      InpMAPeriod    = 20;       // MA / StdDev period
 input int      InpATRPeriod   = 14;       // ATR period
 input int      InpADXPeriod   = 14;       // ADX period
+input int      InpFilterPeriodH1 = 200;  // H1 SMA period for trend filter (0 = disabled)
 
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
@@ -49,7 +50,7 @@ input double   InpATRMaxMultiple  = 2.0;   // Max ATR vs 50-period avg (skip if 
 input double   InpATRMinMultiple  = 0.5;   // Min ATR vs 50-period avg (skip if too quiet)
 
 //--- Global Handles & State
-int handleMA, handleSD, handleATR, handleADX, handleATR50;
+int handleMA, handleSD, handleATR, handleADX, handleATR50, handleMA_H1;
 
 //--- News schedule: red folder (CALENDAR_IMPORTANCE_HIGH) only
 #define MAX_NEWS 40
@@ -84,10 +85,19 @@ int OnInit() {
    handleADX   = iADX(TradeSymbol, _Period, InpADXPeriod);
    handleATR50 = iATR(TradeSymbol, _Period, 50);
 
+   if(InpFilterPeriodH1 > 0)
+      handleMA_H1 = iMA(TradeSymbol, PERIOD_H1, InpFilterPeriodH1, 0, MODE_SMA, PRICE_CLOSE);
+   else
+      handleMA_H1 = INVALID_HANDLE;
+
    if(handleMA == INVALID_HANDLE || handleSD == INVALID_HANDLE ||
       handleATR == INVALID_HANDLE || handleADX == INVALID_HANDLE ||
       handleATR50 == INVALID_HANDLE) {
       Print("Failed to create indicator handles");
+      return(INIT_FAILED);
+   }
+   if(InpFilterPeriodH1 > 0 && handleMA_H1 == INVALID_HANDLE) {
+      Print("Failed to create H1 MA handle");
       return(INIT_FAILED);
    }
 
@@ -103,11 +113,12 @@ int OnInit() {
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
-   if(handleMA    != INVALID_HANDLE) IndicatorRelease(handleMA);
-   if(handleSD    != INVALID_HANDLE) IndicatorRelease(handleSD);
-   if(handleATR   != INVALID_HANDLE) IndicatorRelease(handleATR);
-   if(handleADX   != INVALID_HANDLE) IndicatorRelease(handleADX);
-   if(handleATR50 != INVALID_HANDLE) IndicatorRelease(handleATR50);
+   if(handleMA     != INVALID_HANDLE) IndicatorRelease(handleMA);
+   if(handleSD     != INVALID_HANDLE) IndicatorRelease(handleSD);
+   if(handleATR    != INVALID_HANDLE) IndicatorRelease(handleATR);
+   if(handleADX    != INVALID_HANDLE) IndicatorRelease(handleADX);
+   if(handleATR50  != INVALID_HANDLE) IndicatorRelease(handleATR50);
+   if(handleMA_H1  != INVALID_HANDLE) IndicatorRelease(handleMA_H1);
 }
 
 //+------------------------------------------------------------------+
@@ -324,6 +335,20 @@ void CloseAllOwnPositions(string reason) {
 }
 
 //+------------------------------------------------------------------+
+//  H1 Trend Filter — skip M1 entries that fight the H1 structural trend
+//+------------------------------------------------------------------+
+bool IsAlignedWithH1Trend(bool isBuy) {
+   if(InpFilterPeriodH1 <= 0 || handleMA_H1 == INVALID_HANDLE) return true;
+
+   double h1ma[1];
+   if(CopyBuffer(handleMA_H1, 0, 0, 1, h1ma) < 1) return true;  // fail open
+
+   double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   if(isBuy)  return bid > h1ma[0];  // only buy when price is above H1 SMA
+   return bid < h1ma[0];             // only sell when price is below H1 SMA
+}
+
+//+------------------------------------------------------------------+
 void OnTick() {
    CheckDailyReset();
 
@@ -385,8 +410,10 @@ void OnTick() {
       bool spreadOk  = (spreadPts <= InpMaxSpreadPts);
 
       if(inWindow && isRanging && spreadOk && volOk && !nearNews && MathAbs(zScore) > InpEntryZ) {
-         if(zScore < 0) ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore, adx[0]);
-         else           ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], zScore, adx[0]);
+         if(zScore < 0 && IsAlignedWithH1Trend(true))
+            ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore, adx[0]);
+         else if(zScore > 0 && IsAlignedWithH1Trend(false))
+            ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], zScore, adx[0]);
       }
    }
 
