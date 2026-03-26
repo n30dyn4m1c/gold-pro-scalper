@@ -44,8 +44,31 @@ input bool     InpCloseBeforeNews    = true;  // Close open trades before red-fo
 input bool     InpUseDailyLossLimit  = true;  // Enable max daily loss stop
 input double   InpMaxDailyLossPct    = 20.0;  // Max daily loss % of balance (stops trading)
 
+//--- Trade log: open-trade snapshot captured at entry
+struct TradeRecord {
+   ulong    ticket;
+   datetime openTime;
+   double   openPrice;
+   double   lots;
+   int      type;          // POSITION_TYPE_BUY or POSITION_TYPE_SELL
+   double   openBalance;
+   double   openEquity;
+   double   zScore;
+   double   atr;
+   double   spreadAtEntry;
+   double   riskPct;
+   double   sl;
+   double   tp;
+   string   h1Status;
+   string   comment;
+};
+
 //--- Global Handles & State
 int handleMA, handleSD, handleATR, handleMA_H1;
+ulong       glTicket            = 0;   // active position ticket (0 = no open trade)
+string      glPendingCloseReason = ""; // reason set by CloseAllOwnPositions, read on next tick
+TradeRecord glTradeRecord;             // snapshot of the open trade
+int         glTradeCount        = 0;   // cumulative trade counter (persists across sessions via file)
 double spreadBuffer[20];
 int    spreadIdx = 0;
 bool   spreadBufferFull = false;
@@ -103,6 +126,7 @@ int OnInit() {
    }
 
    if(InpUseNewsFilter) LoadNewsEvents();
+   InitTradeLog();
 
    dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
@@ -246,15 +270,8 @@ double GetDailyLossLimitPct() {
 
 //+------------------------------------------------------------------+
 bool SelectOwnPosition() {
-   for(int i = PositionsTotal() - 1; i >= 0; i--) {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == TradeSymbol &&
-         PositionGetInteger(POSITION_MAGIC) == (long)InpMagic) {
-         return true;
-      }
-   }
-   return false;
+   if(glTicket == 0) return false;
+   return PositionSelectByTicket(glTicket);
 }
 
 //+------------------------------------------------------------------+
@@ -326,6 +343,9 @@ void CloseAllOwnPositions(string reason) {
          Print("Close position failed (", reason, "): ticket=", ticket, " retcode=", res.retcode);
       } else {
          Print("Position closed (", reason, "): ticket=", ticket);
+         if(ticket == glTicket) {
+            glPendingCloseReason = reason;  // OnTick will detect close and log with this reason
+         }
       }
    }
 }
@@ -359,6 +379,13 @@ bool IsAlignedWithH1Trend(bool isBuy) {
 //+------------------------------------------------------------------+
 void OnTick() {
    CheckDailyReset();
+
+   // Detect position close (works in both live and Strategy Tester)
+   if(glTicket != 0 && !PositionSelectByTicket(glTicket)) {
+      LogPositionClose(glPendingCloseReason);
+      glTicket             = 0;
+      glPendingCloseReason = "";
+   }
 
    double ma[1], sd[1], atr[1];
    // We always need current data for spread and ATR (trailing)
@@ -500,7 +527,7 @@ void OnTick() {
 
 //+------------------------------------------------------------------+
 void HandleTrailingStop(double atrVal) {
-   if(!SelectOwnPosition()) return;   // Re-select defensively in case context drifted
+   if(glTicket == 0 || !PositionSelectByTicket(glTicket)) return;
    double currentSL = PositionGetDouble(POSITION_SL);
    double currentTP = PositionGetDouble(POSITION_TP);
    double bid = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
@@ -529,7 +556,7 @@ void HandleTrailingStop(double atrVal) {
 void ModifySL(double nSL, double currentTP) {
    MqlTradeRequest r = {}; MqlTradeResult rs = {};
    r.action   = TRADE_ACTION_SLTP;
-   r.position = (ulong)PositionGetInteger(POSITION_TICKET);
+   r.position = glTicket;
    r.symbol   = TradeSymbol;
    r.sl       = NormalizeDouble(nSL, _Digits);
    r.tp       = NormalizeDouble(currentTP, _Digits);
@@ -542,6 +569,8 @@ void ModifySL(double nSL, double currentTP) {
 void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore) {
    MqlTradeRequest req = {}; MqlTradeResult res = {};
    double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   double bid   = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
+   double ask   = SymbolInfoDouble(TradeSymbol, SYMBOL_ASK);
    int stopLevel = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_TRADE_STOPS_LEVEL);
    
    double slD = InpSLPoints * point;
@@ -606,8 +635,196 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore) {
    if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
       Print("Entry failed: retcode=", res.retcode, " comment=", res.comment);
    } else {
-      Print("Trade opened: ", EnumToString(type), " ", lot, " lots, SL=", NormalizeDouble(sl, _Digits), " TP(hard)=", NormalizeDouble(tp, _Digits), " exitZ=", InpExitZ);
+      // Capture position ticket: res.deal is the position ticket on netting accounts;
+      // fall back to res.order for hedging accounts.
+      glTicket = res.deal;
+      bool posSelected = PositionSelectByTicket(glTicket);
+      if(!posSelected) {
+         glTicket    = res.order;
+         posSelected = PositionSelectByTicket(glTicket);
+      }
+      // Snapshot open-trade details for the trade log
+      glTradeRecord.ticket        = glTicket;
+      glTradeRecord.openTime      = posSelected ? (datetime)PositionGetInteger(POSITION_TIME) : TimeCurrent();
+      glTradeRecord.openPrice     = p;
+      glTradeRecord.lots          = lot;
+      glTradeRecord.type          = (type == ORDER_TYPE_BUY) ? (int)POSITION_TYPE_BUY : (int)POSITION_TYPE_SELL;
+      glTradeRecord.openBalance   = AccountInfoDouble(ACCOUNT_BALANCE);
+      glTradeRecord.openEquity    = AccountInfoDouble(ACCOUNT_EQUITY);
+      glTradeRecord.zScore        = zScore;
+      glTradeRecord.atr           = a;
+      glTradeRecord.spreadAtEntry = (ask - bid) / point;
+      glTradeRecord.riskPct       = riskPct;
+      glTradeRecord.sl            = NormalizeDouble(sl, _Digits);
+      glTradeRecord.tp            = NormalizeDouble(tp, _Digits);
+      string h1Stat = "OFF";
+      if(InpFilterPeriodH1 > 0 && handleMA_H1 != INVALID_HANDLE) {
+         double h1buf[1];
+         if(CopyBuffer(handleMA_H1, 0, 0, 1, h1buf) >= 1)
+            h1Stat = (bid > h1buf[0]) ? "BULL" : "BEAR";
+      }
+      glTradeRecord.h1Status      = h1Stat;
+      glTradeRecord.comment       = comment;
+
+      Print("Trade opened: ticket=", glTicket, " ", EnumToString(type), " ", lot,
+            " lots, SL=", NormalizeDouble(sl, _Digits),
+            " TP(hard)=", NormalizeDouble(tp, _Digits), " exitZ=", InpExitZ);
    }
+}
+//+------------------------------------------------------------------+
+// OnTradeTransaction — kept for broker-side state sync only.
+// All trade logging is handled in OnTick via LogPositionClose().
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest     &request,
+                        const MqlTradeResult      &result) {
+}
+
+//+------------------------------------------------------------------+
+//  LogPositionClose — called from OnTick when position disappears.
+//  Scans deal history for the closing deal so it works in both live
+//  trading and the Strategy Tester (where OnTradeTransaction is unreliable).
+//+------------------------------------------------------------------+
+void LogPositionClose(string reason) {
+   datetime from = (glTradeRecord.openTime > 0) ? glTradeRecord.openTime : TimeCurrent() - 86400;
+   if(!HistorySelect(from, TimeCurrent() + 1)) {
+      Print("LogPositionClose: HistorySelect failed");
+      return;
+   }
+
+   int total = HistoryDealsTotal();
+   for(int i = total - 1; i >= 0; i--) {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0) continue;
+      if(HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      // Match by position ID (= glTradeRecord.ticket on both netting and hedging accounts)
+      if((ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != glTradeRecord.ticket) continue;
+
+      datetime closeTime   = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+      double   closePrice  = HistoryDealGetDouble(deal, DEAL_PRICE);
+      double   grossProfit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+      double   swap        = HistoryDealGetDouble(deal, DEAL_SWAP);
+      double   commission  = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+      string   closeReason = (reason != "") ? reason : HistoryDealGetString(deal, DEAL_COMMENT);
+
+      WriteTradeResult(closeTime, closePrice, grossProfit, swap, commission, closeReason);
+      return;
+   }
+   Print("LogPositionClose: no closing deal found in history for ticket=", glTradeRecord.ticket);
+}
+
+//+------------------------------------------------------------------+
+//  InitTradeLog — count existing trades and write CSV header if new
+//+------------------------------------------------------------------+
+void InitTradeLog() {
+   string filename = "N30_TradeLog_" + TradeSymbol + "_M" + IntegerToString(InpMagic) + ".csv";
+   int handle = FileOpen(filename, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE) {
+      Print("Trade log ERROR: cannot open '", filename, "' error=", GetLastError());
+      return;
+   }
+
+   if(FileSize(handle) == 0) {
+      // Brand-new file — write CSV header immediately so it's visible on attach
+      FileWriteString(handle,
+         "TradeNum,Ticket,OpenTime,CloseTime,Duration_mins,Type,Lots,"
+         "OpenPrice,ClosePrice,SL,TP,"
+         "ZScore,ATR,SpreadPts,RiskPct,"
+         "EquityAtOpen,BalAtOpen,GrossProfit,Swap,Commission,NetPnL,BalAfter,"
+         "H1Trend,CloseReason\n");
+      FileClose(handle);
+      Print("Trade log: new CSV created — '", filename,
+            "' (Live: MQL5/Files/ | Tester: MQL5/Tester/Files/)");
+      return;
+   }
+
+   // Count existing trade rows (data lines start with a digit, header starts with 'T')
+   glTradeCount = 0;
+   while(!FileIsEnding(handle)) {
+      string line = FileReadString(handle);
+      if(StringLen(line) > 0 && line[0] >= '0' && line[0] <= '9') glTradeCount++;
+   }
+   FileClose(handle);
+
+   Print("Trade log: '", filename, "' — ", glTradeCount, " existing trades");
+}
+
+//+------------------------------------------------------------------+
+//  WriteTradeResult — append one CSV row to the trade log
+//+------------------------------------------------------------------+
+void WriteTradeResult(datetime closeTime, double closePrice,
+                      double grossProfit, double swap, double commission,
+                      string closeReason) {
+   glTradeCount++;
+   double netPnL         = grossProfit + swap + commission;
+   double closingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   long   durationSec    = (long)closeTime - (long)glTradeRecord.openTime;
+   int    durationMins   = (int)(durationSec / 60);
+
+   string filename = "N30_TradeLog_" + TradeSymbol + "_M" + IntegerToString(InpMagic) + ".csv";
+   int handle = FileOpen(filename, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE) {
+      Print("WriteTradeResult: cannot open '", filename, "' error=", GetLastError());
+      glTradeCount--;
+      return;
+   }
+
+   if(FileSize(handle) == 0) {
+      // Write CSV header on a brand-new file
+      FileWriteString(handle,
+         "TradeNum,Ticket,OpenTime,CloseTime,Duration_mins,Type,Lots,"
+         "OpenPrice,ClosePrice,SL,TP,"
+         "ZScore,ATR,SpreadPts,RiskPct,"
+         "EquityAtOpen,BalAtOpen,GrossProfit,Swap,Commission,NetPnL,BalAfter,"
+         "H1Trend,CloseReason\n");
+   } else {
+      FileSeek(handle, 0, SEEK_END);
+   }
+
+   string typeStr = (glTradeRecord.type == (int)POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+   // Escape close reason for CSV (replace commas and quotes)
+   string reasonEsc = closeReason;
+   StringReplace(reasonEsc, "\"", "\"\"");
+   if(StringFind(reasonEsc, ",") >= 0) reasonEsc = "\"" + reasonEsc + "\"";
+
+   string line = StringFormat(
+      "%d,%I64u,%s,%s,%d,%s,%.2f,"
+      "%.5f,%.5f,%.5f,%.5f,"
+      "%.4f,%.5f,%.1f,%.2f,"
+      "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+      "%s,%s\n",
+      glTradeCount,
+      glTradeRecord.ticket,
+      TimeToString(glTradeRecord.openTime, TIME_DATE|TIME_SECONDS),
+      TimeToString(closeTime,              TIME_DATE|TIME_SECONDS),
+      durationMins,
+      typeStr,
+      glTradeRecord.lots,
+      glTradeRecord.openPrice,
+      closePrice,
+      glTradeRecord.sl,
+      glTradeRecord.tp,
+      glTradeRecord.zScore,
+      glTradeRecord.atr,
+      glTradeRecord.spreadAtEntry,
+      glTradeRecord.riskPct,
+      glTradeRecord.openEquity,
+      glTradeRecord.openBalance,
+      grossProfit,
+      swap,
+      commission,
+      netPnL,
+      closingBalance,
+      glTradeRecord.h1Status,
+      reasonEsc);
+
+   FileWriteString(handle, line);
+   FileClose(handle);
+
+   Print("Trade #", glTradeCount, " logged | ticket=", glTradeRecord.ticket,
+         " | ", typeStr, " | NetPnL=", StringFormat("%+.2f", netPnL),
+         " | Balance=", DoubleToString(closingBalance, 2),
+         " | Reason: ", closeReason);
 }
 //+------------------------------------------------------------------+
 // This work is my worship unto GOD
