@@ -11,8 +11,8 @@
 //--- Inputs: Strategy
 input string   InpTradeSymbol = "GOLD";        // Trade symbol (GOLD, XAUUSD, etc.)
 string         TradeSymbol;
-input double   InpEntryZ      = 2.4;      // Z-Score entry threshold (1.8–2.5)
-input int      InpADXFilter   = 20;       // ADX range filter (below = ranging)
+input double   InpEntryZ      = 2.0;      // Z-Score entry threshold (1.8–2.5)
+input int      InpADXFilter   = 30;       // ADX range filter (below = ranging)
 input bool     InpUseDynamicRisk = true;  // Enable equity-based risk tiers (overrides InpRiskPct)
 input double   InpRiskPct     = 10.0;     // Risk % per trade (used when dynamic risk is off)
 input double   InpSLPoints    = 800;      // Fixed SL in points (survives gold spikes)
@@ -27,7 +27,7 @@ input int      InpMagic       = 777333;   // Magic number
 input int      InpMAPeriod    = 20;       // MA / StdDev period
 input int      InpATRPeriod   = 14;       // ATR period
 input int      InpADXPeriod   = 14;       // ADX period
-input int      InpFilterPeriodH1 = 200;  // H1 SMA period for trend filter (0 = disabled)
+input int      InpFilterPeriodH1 = 50;   // H1 SMA period for trend filter (0 = disabled)
 
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
@@ -353,8 +353,10 @@ void OnTick() {
    CheckDailyReset();
 
    double ma[1], sd[1], atr[1], adx[1];
+   double prevMA[1], prevSD[1];
    if(CopyBuffer(handleMA,0,0,1,ma)<1 || CopyBuffer(handleSD,0,0,1,sd)<1 ||
       CopyBuffer(handleATR,0,0,1,atr)<1 || CopyBuffer(handleADX,0,0,1,adx)<1) return;
+   if(CopyBuffer(handleMA,0,1,1,prevMA)<1 || CopyBuffer(handleSD,0,1,1,prevSD)<1) return;
 
    MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
    double bid   = SymbolInfoDouble(TradeSymbol, SYMBOL_BID);
@@ -363,30 +365,26 @@ void OnTick() {
 
    if(sd[0] <= 0.0) return;
 
+   double prevClose     = iClose(TradeSymbol, _Period, 1);
+   double prevZScore    = (prevSD[0] > 0.0) ? (prevClose - prevMA[0]) / prevSD[0] : 0.0;
    double zScore        = (bid - ma[0]) / sd[0];
    bool nearNews        = IsNearNews();
    bool lossLimitHit    = IsDailyLossLimitHit();
    bool redNewsImminent = IsRedNewsImminent();
    bool volOk           = IsVolatilityOk(atr[0]);
 
-   // --- Enhanced Spread Check: block if spread exceeds either the fixed cap OR 50% of ATR (in points) ---
+   // --- Spread Check: block if spread exceeds either the fixed cap OR 100% of ATR (in points) ---
    double spreadPts = (ask - bid) / point;
    double atrPts    = atr[0] / point;
-   bool spreadOk    = (spreadPts <= InpMaxSpreadPts) && (spreadPts <= 0.5 * atrPts);
-
-   // --- Marubozu Filter: skip if last completed M1 candle body > 90% of its total range ---
-   double prevHigh    = iHigh(TradeSymbol, _Period, 1);
-   double prevLow     = iLow(TradeSymbol, _Period, 1);
-   double prevOpen    = iOpen(TradeSymbol, _Period, 1);
-   double prevClose   = iClose(TradeSymbol, _Period, 1);
-   double candleRange = prevHigh - prevLow;
-   double candleBody  = MathAbs(prevClose - prevOpen);
-   bool marubozuBlock = (candleRange > 0 && (candleBody / candleRange) > 0.90);
+   bool spreadOk    = (spreadPts <= InpMaxSpreadPts) && (spreadPts <= 1.0 * atrPts);
 
    // --- Pre-compute filter states for Comment display ---
    bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
    bool isRanging = (adx[0] < InpADXFilter);
-   bool zHook     = (MathAbs(zScore) > InpEntryZ);
+   // Z-Score Hook: price must be at extreme AND Z must be starting to revert (hook forming)
+   bool zBuyHook  = (zScore < -InpEntryZ && zScore > prevZScore);  // Z was more negative, now rising back
+   bool zSellHook = (zScore >  InpEntryZ && zScore < prevZScore);  // Z was more positive, now falling back
+   bool zHook     = (zBuyHook || zSellHook);
 
    string h1Status = "OFF";
    if(InpFilterPeriodH1 > 0 && handleMA_H1 != INVALID_HANDLE) {
@@ -431,31 +429,28 @@ void OnTick() {
       // --- ENTRY LOGIC ---
       if(CountOwnPositions() >= InpMaxPositions) return;  // max positions limit
 
-      if(inWindow && isRanging && spreadOk && volOk && !nearNews && !marubozuBlock && zHook) {
-         if(zScore < 0 && IsAlignedWithH1Trend(true))
-            ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore, adx[0]);
-         else if(zScore > 0 && IsAlignedWithH1Trend(false))
-            ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], zScore, adx[0]);
-      }
+      bool baseFilters = (inWindow && isRanging && spreadOk && volOk && !nearNews);
+      if(baseFilters && zBuyHook && IsAlignedWithH1Trend(true))
+         ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], zScore, adx[0]);
+      else if(baseFilters && zSellHook && IsAlignedWithH1Trend(false))
+         ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], zScore, adx[0]);
    }
 
    double dailyLossPct = ((dailyStartBalance - AccountInfoDouble(ACCOUNT_EQUITY)) / dailyStartBalance) * 100.0;
-   double bodyPct      = (candleRange > 0) ? (candleBody / candleRange) * 100.0 : 0.0;
 
    Comment("--- N30 GOLD REVERSION v5 ---\n",
            "Equity: $", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
            " | Risk: ", DoubleToString(GetRiskPct(), 1), "%\n",
-           "Z-Score: ", DoubleToString(zScore, 2),
-           "  Z-Hook: ", (zHook ? "OK" : "wait"), "\n",
+           "Z-Score: ", DoubleToString(zScore, 2), " (prev:", DoubleToString(prevZScore, 2), ")",
+           "  Z-Hook: ", (zBuyHook ? "BUY" : zSellHook ? "SELL" : "wait"), "\n",
            "ADX: ", DoubleToString(adx[0], 1),
            "  Ranging: ", (isRanging ? "YES" : "no"), "\n",
            "ATR: ", DoubleToString(atr[0], 2),
            "  Vol-Filter: ", (volOk ? "OK" : "BLOCKED"), "\n",
-           "Spread: ", DoubleToString(spreadPts, 1), "pts / ATR50%=", DoubleToString(0.5 * atrPts, 1),
+           "Spread: ", DoubleToString(spreadPts, 1), "pts / ATR100%=", DoubleToString(atrPts, 1),
            "  ", (spreadOk ? "OK" : "BLOCKED"), "\n",
            "H1 Trend: ", h1Status,
            "  Session: ", (inWindow ? "OK" : "closed"), "\n",
-           "Marubozu: ", (marubozuBlock ? "BLOCKED(" + DoubleToString(bodyPct, 0) + "%)" : "OK"), "\n",
            "News: ", (nearNews ? "BLOCKED" : "clear"),
            (redNewsImminent ? " [CLOSING NOW]" : ""), "\n",
            "Daily P/L: ", DoubleToString(-dailyLossPct, 2), "% / -", DoubleToString(GetDailyLossLimitPct(), 1), "% DLL");
