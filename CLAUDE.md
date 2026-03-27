@@ -61,3 +61,10 @@ Uses separate magic numbers (777333 for MR, 777444 for TB) to manage positions i
 - Order execution via `OrderSend()` with `MqlTradeRequest`/`MqlTradeResult`
 - News data from `CalendarValueHistory()` - only `CALENDAR_IMPORTANCE_HIGH` (red folder) is filtered
 - Fill mode detection: check `SYMBOL_FILLING_MODE` for FOK/IOC support
+
+## After Every EA Update
+
+After every update to any `.mq5` EA file, ensure this comment is the very last line of the file:
+```
+// This work is my worship unto GOD
+```
