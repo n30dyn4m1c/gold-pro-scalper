@@ -23,12 +23,15 @@ input int      InpStartHour   = 10;       // Trade window start hour
 input int      InpEndHour     = 20;       // Trade window end hour (exclusive)
 input int      InpFridayCloseHour = 20;   // Friday hour to close and stop
 input int      InpMaxHoldMinutes = 30;    // Max trade duration in minutes
+input int      InpCooldownMins = 10;      // Pause after a losing trade, minutes (0 = disabled)
 input int      InpMagic       = 777333;   // Magic number
 
 //--- Inputs: Indicators
 input int      InpMAPeriod    = 20;       // MA / StdDev period
 input int      InpATRPeriod   = 14;       // ATR period
 input int      InpFilterPeriodH1 = 50;   // H1 SMA period for trend filter (0 = disabled)
+input int      InpADXPeriod   = 14;       // ADX period
+input double   InpADXMax      = 25.0;     // Skip entries when ADX above this (0 = disabled)
 
 //--- Inputs: Execution
 input int      InpSlippage    = 30;       // Max slippage in points
@@ -65,11 +68,14 @@ struct TradeRecord {
 };
 
 //--- Global Handles & State
-int handleMA, handleSD, handleATR, handleMA_H1;
+int handleMA, handleSD, handleATR, handleMA_H1, handleADX;
 ulong       glTicket            = 0;   // active position ticket (0 = no open trade)
 string      glPendingCloseReason = ""; // reason set by CloseAllOwnPositions, read on next tick
 TradeRecord glTradeRecord;             // snapshot of the open trade
 int         glTradeCount        = 0;   // cumulative trade counter (persists across sessions via file)
+double      glZScore            = 0;   // Z-Score of last closed bar
+bool        glZValid            = false; // false until first successful Z computation (guards exits after restart)
+datetime    glLossCooldownUntil = 0;   // no new entries until this time after a losing trade
 double spreadBuffer[20];
 int    spreadIdx = 0;
 bool   spreadBufferFull = false;
@@ -97,7 +103,8 @@ int      glEntryConfirmDir   = 0;   // 1 = buy signal, -1 = sell signal, 0 = no 
 
 //--- Price Velocity filter: block entry when price moves > 25% of M1 ATR within 10 ticks
 #define VELOCITY_TICKS 10
-double   glVelBuf[VELOCITY_TICKS]; // circular buffer of last 10 bid prices
+double   glVelBuf[VELOCITY_TICKS];   // circular buffer of last 10 bid prices
+datetime glVelTime[VELOCITY_TICKS];  // arrival time of each buffered tick
 int      glVelIdx        = 0;      // write index
 bool     glVelBufFull    = false;  // true once buffer has been filled once
 datetime glVelBlockUntil = 0;      // entry blocked until this server time
@@ -129,6 +136,11 @@ int OnInit() {
    else
       handleMA_H1 = INVALID_HANDLE;
 
+   if(InpADXMax > 0)
+      handleADX = iADX(TradeSymbol, _Period, InpADXPeriod);
+   else
+      handleADX = INVALID_HANDLE;
+
    if(handleMA == INVALID_HANDLE || handleSD == INVALID_HANDLE ||
       handleATR == INVALID_HANDLE) {
       Print("Failed to create indicator handles");
@@ -136,6 +148,10 @@ int OnInit() {
    }
    if(InpFilterPeriodH1 > 0 && handleMA_H1 == INVALID_HANDLE) {
       Print("Failed to create H1 MA handle");
+      return(INIT_FAILED);
+   }
+   if(InpADXMax > 0 && handleADX == INVALID_HANDLE) {
+      Print("Failed to create ADX handle");
       return(INIT_FAILED);
    }
 
@@ -159,11 +175,60 @@ int OnInit() {
 
    // Reset price velocity filter on (re)init
    ArrayInitialize(glVelBuf, 0.0);
+   for(int v = 0; v < VELOCITY_TICKS; v++) glVelTime[v] = 0;
    glVelIdx        = 0;
    glVelBufFull    = false;
    glVelBlockUntil = 0;
 
+   // Seed Z-Score from the last closed bar so exits don't act on a bogus Z=0 after restart
+   glZValid = false;
+   UpdateZScore();
+
+   // Recover an open position after restart so it keeps being managed
+   // (without this, an orphaned position gets no trailing/exits and a
+   //  fresh zScore of 0 would have instantly closed it as a false Gravity Exit)
+   glTicket = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != TradeSymbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagic) continue;
+
+      glTicket = ticket;
+      glTradeRecord.ticket        = ticket;
+      glTradeRecord.openTime      = (datetime)PositionGetInteger(POSITION_TIME);
+      glTradeRecord.openPrice     = PositionGetDouble(POSITION_PRICE_OPEN);
+      glTradeRecord.lots          = PositionGetDouble(POSITION_VOLUME);
+      glTradeRecord.type          = (int)PositionGetInteger(POSITION_TYPE);
+      glTradeRecord.openBalance   = AccountInfoDouble(ACCOUNT_BALANCE);
+      glTradeRecord.openEquity    = AccountInfoDouble(ACCOUNT_EQUITY);
+      glTradeRecord.zScore        = 0;
+      glTradeRecord.atr           = 0;
+      glTradeRecord.spreadAtEntry = 0;
+      glTradeRecord.riskPct       = 0;
+      glTradeRecord.sl            = PositionGetDouble(POSITION_SL);
+      glTradeRecord.tp            = PositionGetDouble(POSITION_TP);
+      glTradeRecord.h1Status      = "RECOVERED";
+      glTradeRecord.comment       = PositionGetString(POSITION_COMMENT);
+      Print("Recovered open position after restart: ticket=", ticket);
+      break;
+   }
+
    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//  UpdateZScore — Z-Score of the last closed bar (shift 1)
+//+------------------------------------------------------------------+
+void UpdateZScore() {
+   double ma1[1], sd1[1];
+   if(CopyBuffer(handleMA,0,1,1,ma1)>=1 && CopyBuffer(handleSD,0,1,1,sd1)>=1) {
+      double close1 = iClose(TradeSymbol, _Period, 1);
+      if(sd1[0] > 0.0) {
+         glZScore = (close1 - ma1[0]) / sd1[0];
+         glZValid = true;
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -172,6 +237,7 @@ void OnDeinit(const int reason) {
    if(handleSD     != INVALID_HANDLE) IndicatorRelease(handleSD);
    if(handleATR    != INVALID_HANDLE) IndicatorRelease(handleATR);
    if(handleMA_H1  != INVALID_HANDLE) IndicatorRelease(handleMA_H1);
+   if(handleADX    != INVALID_HANDLE) IndicatorRelease(handleADX);
 }
 
 //+------------------------------------------------------------------+
@@ -190,6 +256,7 @@ void CheckDailyReset() {
 bool IsDailyLossLimitHit() {
    if(!InpUseDailyLossLimit) return false;
    if(dailyLossHit) return true;
+   if(dailyStartBalance <= 0) return false;
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double lossPercent = ((dailyStartBalance - equity) / dailyStartBalance) * 100.0;
@@ -212,7 +279,8 @@ void LoadNewsEvents() {
    TimeToStruct(TimeCurrent(), dt);
 
    datetime dayStart = TimeCurrent() - (dt.hour * 3600 + dt.min * 60 + dt.sec);
-   datetime dayEnd   = dayStart + 86400;
+   // Extend past midnight so early-next-day events still trigger the pre-news pause
+   datetime dayEnd   = dayStart + 86400 + InpNewsMinsBefore * 60;
 
    MqlCalendarValue values[];
    if(!CalendarValueHistory(values, dayStart, dayEnd)) return;
@@ -437,15 +505,19 @@ void OnTick() {
    double spreadMA = (count > 0) ? (spreadSum / count) : currentSpread;
 
    // --- PRICE VELOCITY FILTER: update 10-tick bid buffer ---
-   glVelBuf[glVelIdx] = bid;
+   glVelBuf[glVelIdx]  = bid;
+   glVelTime[glVelIdx] = TimeCurrent();
    glVelIdx++;
    if(glVelIdx >= VELOCITY_TICKS) { glVelIdx = 0; glVelBufFull = true; }
    if(glVelBufFull) {
       // oldest value is at current write position (about to be overwritten next tick)
-      double oldest  = glVelBuf[glVelIdx % VELOCITY_TICKS];
-      double newest  = glVelBuf[(glVelIdx + VELOCITY_TICKS - 1) % VELOCITY_TICKS];
-      double velMove = MathAbs(newest - oldest);
-      if(velMove > 0.25 * atr[0])
+      int oldIdx     = glVelIdx % VELOCITY_TICKS;
+      int newIdx     = (glVelIdx + VELOCITY_TICKS - 1) % VELOCITY_TICKS;
+      double velMove = MathAbs(glVelBuf[newIdx] - glVelBuf[oldIdx]);
+      long   velSpan = (long)(glVelTime[newIdx] - glVelTime[oldIdx]);
+      // Only a genuine spike counts: 10 ticks can span minutes in quiet markets,
+      // and slow drift of 25% ATR over that span is normal, not a knife
+      if(velSpan <= 10 && velMove > 0.25 * atr[0])
          glVelBlockUntil = TimeCurrent() + 3;  // block entries for 3 seconds
    }
 
@@ -456,15 +528,14 @@ void OnTick() {
 
    // --- Z-Score Calculation (Shift 1 for OHLC alignment) ---
    // We only update Z-Score once per bar to match OHLC backtest signals
-   static double zScore = 0;
-   if(isNewBar) {
-      double ma1[1], sd1[1];
-      if(CopyBuffer(handleMA,0,1,1,ma1)>=1 && CopyBuffer(handleSD,0,1,1,sd1)>=1) {
-         double close1 = iClose(TradeSymbol, _Period, 1);
-         zScore = (sd1[0] > 0.0) ? (close1 - ma1[0]) / sd1[0] : 0.0;
-      }
-   }
-   
+   if(isNewBar) UpdateZScore();
+   double zScore = glZScore;
+
+   // --- Live Z-Score (current bid vs current MA/SD) ---
+   // Guards against stale signals: the closed-bar Z stays extreme for the whole
+   // next bar even after price has already snapped back intra-bar
+   double liveZ = (sd[0] > 0.0) ? (bid - ma[0]) / sd[0] : 0.0;
+
    // --- Volatility Ratio & Dynamic Z-Score Threshold ---
    double atrBuf100[100];
    double avgATR100 = 0;
@@ -476,22 +547,36 @@ void OnTick() {
       avgATR100 = atr[0]; // fallback: ratio = 1.0 (no adjustment)
    }
    double volRatio  = (avgATR100 > 0) ? (atr[0] / avgATR100) : 1.0;
-   double dynamicZ  = InpEntryZ + (volRatio > 1.5 ? 0.5 : 0.0);
-   double softZ     = InpEntryZ * 0.75;
-   // Stable market (volRatio 0.7–1.1): lower soft threshold captures more standard reversions
-   // Elevated volatility (volRatio > 1.2): demand full dynamicZ to avoid noise spikes
-   double entryZ    = (volRatio >= 0.7 && volRatio <= 1.1) ? softZ : dynamicZ;
+   // Full threshold always; raised +0.5 in elevated volatility to avoid noise spikes.
+   // (The old "soft" 0.75x threshold entered at Z~1.5 — too weak an extreme for
+   //  mean reversion, producing many low-edge trades that mostly paid spread.)
+   double entryZ    = InpEntryZ + (volRatio > 1.5 ? 0.5 : 0.0);
 
    bool nearNews        = IsNearNews();
    bool lossLimitHit    = IsDailyLossLimitHit();
    bool redNewsImminent = IsRedNewsImminent();
    bool weekendRisk     = IsWeekendRisk();
 
-   // --- Spread Check (ATR-relative only) ---
+   // --- Spread Check ---
    double atrPts           = atr[0] / point;
    double maxAllowedSpread = atrPts * 0.12;  // block entry when spread > 12% of current M1 ATR
    bool spreadOk = (currentSpread <= maxAllowedSpread) &&     // ATR-relative gate
-                   (currentSpread <= spreadMA * 1.5);         // liquidity-gap guard: no entry if spread > 1.5x 20-tick average
+                   (currentSpread <= spreadMA * 1.5) &&       // liquidity-gap guard: no entry if spread > 1.5x 20-tick average
+                   (currentSpread <= InpMaxSpreadPts);        // absolute cap
+
+   // --- ADX Regime Filter: mean reversion only works in ranging markets ---
+   bool   adxOk  = true;
+   double adxVal = 0;
+   if(InpADXMax > 0 && handleADX != INVALID_HANDLE) {
+      double adxBuf[1];
+      if(CopyBuffer(handleADX, 0, 0, 1, adxBuf) >= 1) {
+         adxVal = adxBuf[0];
+         adxOk  = (adxVal <= InpADXMax);
+      }
+   }
+
+   // --- Loss Cooldown: no re-entry right after a losing trade ---
+   bool cooldownOk = (TimeCurrent() >= glLossCooldownUntil);
 
    // --- Pre-compute filter states ---
    bool inWindow  = (dt.hour >= InpStartHour && dt.hour < InpEndHour);
@@ -545,10 +630,14 @@ void OnTick() {
          CloseAllOwnPositions("Time Exit (" + tradeDurStr + ")");
       } else {
          // Z-Score TP: Gravity Exit — exit threshold decays toward 0 as trade ages
+         // glZValid guard: never act on the uninitialized Z=0 right after a restart,
+         // which would instantly close a recovered position as a false reversion
          long posType = PositionGetInteger(POSITION_TYPE);
          bool zRevert = false;
-         if(posType == POSITION_TYPE_BUY && zScore >= -gravityExitZ) zRevert = true;
-         if(posType == POSITION_TYPE_SELL && zScore <= gravityExitZ) zRevert = true;
+         if(glZValid) {
+            if(posType == POSITION_TYPE_BUY && zScore >= -gravityExitZ) zRevert = true;
+            if(posType == POSITION_TYPE_SELL && zScore <= gravityExitZ) zRevert = true;
+         }
 
          if(zRevert) {
             CloseAllOwnPositions("Gravity Exit (Z=" + DoubleToString(zScore, 2) + " tgt=" + DoubleToString(gravityExitZ, 2) + ")");
@@ -564,13 +653,15 @@ void OnTick() {
       }
    } else { // --- ENTRY LOGIC (every tick, gated by flash-spike filter) ---
       if(CountOwnPositions() < InpMaxPositions) {
-         bool baseFilters = (inWindow && spreadOk && !nearNews);
+         bool baseFilters = (inWindow && spreadOk && !nearNews && adxOk && cooldownOk && glZValid);
 
-         // Determine current signal direction (0 = no signal)
+         // Determine current signal direction (0 = no signal).
+         // liveZ must still be stretched (90% of threshold): the closed-bar signal
+         // alone would chase entries after the intra-bar snap-back already happened
          int signalDir = 0;
          if(baseFilters) {
-            if(zScore < -entryZ && IsAlignedWithH1Trend(true))       signalDir =  1;
-            else if(zScore > entryZ && IsAlignedWithH1Trend(false))  signalDir = -1;
+            if(zScore < -entryZ && liveZ <= -entryZ * 0.9 && IsAlignedWithH1Trend(true))       signalDir =  1;
+            else if(zScore > entryZ && liveZ >= entryZ * 0.9 && IsAlignedWithH1Trend(false))   signalDir = -1;
          }
 
          // --- Confirmation gate: accumulate or reset ---
@@ -606,10 +697,12 @@ void OnTick() {
 
    Comment("--- N30 GOLD REVERSION (SIMPLE) ---\n",
            "Z-Score(1): ", DoubleToString(zScore, 2),
-           "  |  Z-Target: ", DoubleToString(entryZ, 2),
-           " (", (volRatio >= 0.7 && volRatio <= 1.1 ? "SOFT" : "FULL"), ")\n",
+           "  |  Live Z: ", DoubleToString(liveZ, 2),
+           "  |  Z-Target: ", DoubleToString(entryZ, 2), "\n",
            "Volatility Ratio: ", DoubleToString(volRatio, 2),
-           (volRatio > 1.5 ? "  [HIGH - Z raised +0.5]" : (volRatio >= 0.7 && volRatio <= 1.1 ? "  [stable - soft threshold]" : "  [normal]")), "\n",
+           (volRatio > 1.5 ? "  [HIGH - Z raised +0.5]" : "  [normal]"), "\n",
+           "ADX: ", DoubleToString(adxVal, 1), " / Max: ", DoubleToString(InpADXMax, 1),
+           " ", (adxOk ? "OK" : "BLOCKED [trending]"), "\n",
            "H1 Trend: ", h1Status, "\n",
            "Spread: ", DoubleToString(currentSpread, 1),
            " / MaxAllowed: ", DoubleToString(maxAllowedSpread, 1),
@@ -617,6 +710,7 @@ void OnTick() {
            "News: ", (nearNews ? "BLOCKED" : "clear"),
            (redNewsImminent ? " [CLOSING NOW]" : ""), "\n",
            "Velocity: ", (TimeCurrent() < glVelBlockUntil ? "BLOCKED (" + IntegerToString((int)(glVelBlockUntil - TimeCurrent())) + "s)" : "ok"), "\n",
+           "Loss Cooldown: ", (cooldownOk ? "none" : IntegerToString((int)((glLossCooldownUntil - TimeCurrent()) / 60)) + "m remaining"), "\n",
            "Trade Duration: ", tradeDurStr);
 }
 
@@ -775,12 +869,19 @@ void ExecuteTrade(ENUM_ORDER_TYPE type, double p, double a, double zScore) {
    if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE) {
       Print("Entry failed: retcode=", res.retcode, " comment=", res.comment);
    } else {
-      // Capture position ticket: res.deal is the position ticket on netting accounts;
-      // fall back to res.order for hedging accounts.
-      glTicket = res.deal;
-      bool posSelected = PositionSelectByTicket(glTicket);
+      // Capture position ticket: the deal's DEAL_POSITION_ID is the position
+      // ticket on both netting and hedging accounts; fall back to res.order
+      // then res.deal if the deal isn't in history yet.
+      glTicket = 0;
+      if(res.deal > 0 && HistoryDealSelect(res.deal))
+         glTicket = (ulong)HistoryDealGetInteger(res.deal, DEAL_POSITION_ID);
+      bool posSelected = (glTicket != 0) && PositionSelectByTicket(glTicket);
       if(!posSelected) {
          glTicket    = res.order;
+         posSelected = PositionSelectByTicket(glTicket);
+      }
+      if(!posSelected) {
+         glTicket    = res.deal;
          posSelected = PositionSelectByTicket(glTicket);
       }
       // Snapshot open-trade details for the trade log
@@ -897,6 +998,13 @@ void WriteTradeResult(datetime closeTime, double closePrice,
    glTradeCount++;
    double netPnL         = grossProfit + swap + commission;
    double closingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   // Loss cooldown: the frozen closed-bar Z is often still extreme right after a
+   // stop-out/time-exit, so an immediate re-entry walks straight back into the move
+   if(netPnL < 0 && InpCooldownMins > 0) {
+      glLossCooldownUntil = TimeCurrent() + (long)InpCooldownMins * 60;
+      Print("Losing trade — entry cooldown until ", TimeToString(glLossCooldownUntil, TIME_DATE|TIME_MINUTES));
+   }
    long   durationSec    = (long)closeTime - (long)glTradeRecord.openTime;
    int    durationMins   = (int)(durationSec / 60);
 
