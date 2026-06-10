@@ -446,21 +446,14 @@ if(baseFilters && IsNewBar())
    double maPrev[1], sdPrev[1];
    if(CopyBuffer(handleMA,0,1,1,maPrev)<1 || CopyBuffer(handleSD,0,1,1,sdPrev)<1) return;
    if(sdPrev[0] <= 0) return;
-   
+
    double closedZ = (bid - maPrev[0]) / sdPrev[0];
-   
+
    if(closedZ < -InpEntryZ && IsAlignedWithH1Trend(true))
       ExecuteTrade(ORDER_TYPE_BUY, ask, atr[0], closedZ);
    else if(closedZ > InpEntryZ && IsAlignedWithH1Trend(false))
       ExecuteTrade(ORDER_TYPE_SELL, bid, atr[0], closedZ);
 }
-
-static double lastZ = 0;
-if(MathAbs(zScore) > InpEntryZ && MathAbs(lastZ) > InpEntryZ * 0.8) // required two ticks confirmation
-{
-   // then do the entry checks
-}
-lastZ = zScore;
    }
 
    Comment("--- N30 GOLD REVERSION (SIMPLE) ---\n",
