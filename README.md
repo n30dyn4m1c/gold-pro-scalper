@@ -6,8 +6,49 @@ Automated gold (XAUUSD) scalping EAs for MetaTrader 5. Built for aggressive smal
 
 | EA | File | Symbol | Timeframe | SL | TP |
 |----|------|--------|-----------|----|----|
+| **N30 Gold Reversion TickRobust** | `XAU_Quant_Reversion_TickRobust.mq5` | GOLD (XAUUSD) | M1 | max(800 pts, 2.5×ATR) | Server-side limit at the mean |
 | **N30 Gold Reversion** | `XAU_Quant_Reversion.mq5` | GOLD (XAUUSD) | M1 | Fixed 800 pts | Z-Score return to 0 |
 | **N30 Gold Dual Strategy** | `XAU_Quant_Reversion_Breakout.mq5` | GOLD (XAUUSD) | M1 | MR: 800 pts / TB: 1000 pts | Z-Score / Donchian TP |
+
+---
+
+## N30 Gold Reversion TickRobust (`XAU_Quant_Reversion_TickRobust.mq5`)
+
+Mean-reversion EA rebuilt specifically to survive **Every Tick** backtesting, not just M1 OHLC. The earlier EAs made entry/exit decisions on individual ticks — profitable under OHLC modelling (which only generates a few synthetic ticks per bar) but losing under real ticks, where noise fires the Z-exit at the worst price and spread eats the thin snap-back.
+
+### Design rules (the Every-Tick defence)
+
+1. **Once-per-bar decisions on closed-bar data.** Entry, exits, breakeven, and TP retargeting are all evaluated exactly once at each bar open, from shift-1 indicator values. Tick noise cannot trigger anything, so Every Tick and OHLC results converge by construction. Only server-side SL/TP act intra-bar.
+2. **Cost gate.** A trade is only taken when both the StdDev (the fuel of the reversion) and the distance from fill price to the mean are a clear multiple of the full round-trip cost (live spread + `InpExtraCostPts` for commission). Defaults: StdDev ≥ 3× cost, TP distance ≥ 4× cost. This kills the quiet-market trades that only ever paid spread.
+3. **Server-side limit TP at the mean.** The natural mean-reversion target (the SMA) is placed as a broker-side TP — limit fills pay no spread on exit and behave identically in tester and live. Each bar the TP is retargeted to the fresh SMA ("gravity"), floored so a fill always still covers the round-trip cost.
+4. **Turn confirmation.** Entry requires the last closed bar to have stopped making progress in the stretch direction (`Close[1]` vs `Close[2]`) — no catching the falling knife the moment Z crosses the threshold.
+5. **Wide, volatility-aware SL.** `max(800 pts, 2.5×ATR)` so intra-bar spikes that OHLC interpolation hides don't become surprise stop-outs under real ticks.
+
+### Entry (evaluated at each M1 bar open)
+
+- Closed-bar Z-Score beyond ±2.2 (`InpEntryZ`)
+- Turn confirmation bar (`InpRequireTurn`)
+- Closed-bar ADX ≤ 22 (ranging market)
+- ATR between 0.4× and 2.0× of its 50-bar average (no spikes, no dead market)
+- Cost gate passes (see above), spread ≤ 50 pts absolute cap
+- Session window 10:00–20:00, no red-folder USD news, loss cooldown elapsed
+- Optional H1 SMA trend alignment (closed H1 bar, no repaint)
+
+### Exit priority
+
+1. **Server-side limit TP at the mean** — usually fires first, no spread paid
+2. **Closed-bar Z reversion backup** (`|Z| ≤ 0.2`) — for when the TP was retargeted away
+3. **Time exit** — 40 bars (`InpMaxHoldBars`); a reversion that hasn't happened isn't coming
+4. **Breakeven** — SL moved to entry + costs after 1×ATR in profit
+5. **Server-side SL** — max(800 pts, 2.5×ATR)
+
+Risk tiers, news filter, daily loss limit, Friday/weekend close, and loss cooldown are shared with the other EAs. Magic number: **777555**.
+
+### Backtesting notes
+
+- Validate on **Every Tick (real ticks preferred)** — that is what this EA is built for. OHLC results should now closely match tick results; if they diverge significantly, something in the setup (spread settings, symbol) is off.
+- If your broker charges commission, set `InpExtraCostPts` to the round-trip commission expressed in gold points (e.g. $7/lot round-trip ≈ 70 pts on a 0.01-lot-per-point-value symbol — check your contract spec).
+- Expect **fewer trades** than the older EAs. The cost gate deliberately skips the marginal trades that made OHLC backtests look busy and profitable but lost money under real ticks.
 
 ---
 
