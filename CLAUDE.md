@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MetaTrader 5 Expert Advisor (EA) for automated gold (XAUUSD) trading. Written in MQL5.
 
-**Primary EA**: `XAU_Quant_Reversion.mq5` - Mean reversion scalper using Z-Score
+**Primary EA**: `XAU_Quant_Reversion_TickRobust.mq5` - Mean reversion built for Every Tick modelling: once-per-bar closed-bar decisions, round-trip cost gate, server-side limit TP at the mean (magic 777555)
+**Legacy EAs**: `XAU_Quant_Reversion_m1_OLHC.mq5` / `XAU_Quant_Reversion_m1_EveryTick.mq5` - tick-level Z-Score scalpers (profitable on M1 OHLC modelling only)
 **Secondary EA**: `XAU_Quant_Reversion_Breakout.mq5` - Dual strategy combining mean reversion + Donchian channel breakout
 
 ## Build & Deploy
