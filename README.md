@@ -1,270 +1,139 @@
 # N30 Gold Reversion
 
-Automated gold (XAUUSD) scalping EAs for MetaTrader 5. Built for aggressive small-account growth on XM Global micro accounts.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/Platform-MetaTrader%205-blue.svg)](https://www.metatrader5.com/)
+[![Language](https://img.shields.io/badge/Language-MQL5-orange.svg)](https://www.mql5.com/)
+[![Symbol](https://img.shields.io/badge/Symbol-XAUUSD%20%2F%20GOLD-yellow.svg)](https://github.com/n30dyn4m1c/gold-pro-scalper)
 
-## EAs
+**MetaTrader 5 mean-reversion scalping EAs for gold (XAUUSD / GOLD) on M1 — Z-Score entries, cost-aware exits, and dynamic risk tiers.**
 
-| EA | File | Symbol | Timeframe | SL | TP |
-|----|------|--------|-----------|----|----|
-| **N30 Gold Reversion TickRobust** | `XAU_Quant_Reversion_TickRobust.mq5` | GOLD (XAUUSD) | M1 | max(800 pts, 2.5×ATR) | Server-side limit at the mean |
-| **N30 Gold Reversion** | `XAU_Quant_Reversion.mq5` | GOLD (XAUUSD) | M1 | Fixed 800 pts | Z-Score return to 0 |
-| **N30 Gold Dual Strategy** | `XAU_Quant_Reversion_Breakout.mq5` | GOLD (XAUUSD) | M1 | MR: 800 pts / TB: 1000 pts | Z-Score / Donchian TP |
+Built for aggressive small-account growth on XM Global–style micro accounts. Multiple variants share the same core idea: trade statistical extremes when the market is ranging, and defend against Every-Tick noise, spread, and news.
+
+## EAs in this repo
+
+| EA | File | Focus |
+|----|------|--------|
+| **TickRobust** | `XAU_Quant_Reversion_TickRobust.mq5` | Once-per-bar decisions; survives Every Tick testing |
+| **M1 OHLC** | `XAU_Quant_Reversion_m1_OLHC.mq5` | Full-featured mean reversion (OHLC-oriented) |
+| **M1 EveryTick** | `XAU_Quant_Reversion_m1_EveryTick.mq5` | Tick-path variant |
+| **Dual Strategy** | `XAU_Quant_Reversion_Breakout.mq5` | Mean reversion + Donchian trend breakout |
+
+All target **GOLD / XAUUSD** on **M1**. Magic numbers keep strategies independent (e.g. 777555 TickRobust, 777333 MR, 777444 breakout).
 
 ---
 
-## N30 Gold Reversion TickRobust (`XAU_Quant_Reversion_TickRobust.mq5`)
+## TickRobust (`XAU_Quant_Reversion_TickRobust.mq5`)
 
-Mean-reversion EA rebuilt specifically to survive **Every Tick** backtesting, not just M1 OHLC. The earlier EAs made entry/exit decisions on individual ticks — profitable under OHLC modelling (which only generates a few synthetic ticks per bar) but losing under real ticks, where noise fires the Z-exit at the worst price and spread eats the thin snap-back.
+Mean-reversion EA rebuilt to survive **Every Tick** backtesting, not just M1 OHLC. Earlier designs decided on individual ticks — fine under sparse synthetic OHLC ticks, but losing under real ticks where noise hits the Z-exit at the worst price and spread eats thin snap-backs.
 
-### Design rules (the Every-Tick defence)
+### Every-Tick defence
 
-1. **Once-per-bar decisions on closed-bar data.** Entry, exits, breakeven, and TP retargeting are all evaluated exactly once at each bar open, from shift-1 indicator values. Tick noise cannot trigger anything, so Every Tick and OHLC results converge by construction. Only server-side SL/TP act intra-bar.
-2. **Cost gate.** A trade is only taken when both the StdDev (the fuel of the reversion) and the distance from fill price to the mean are a clear multiple of the full round-trip cost (live spread + `InpExtraCostPts` for commission). Defaults: StdDev ≥ 3× cost, TP distance ≥ 4× cost. This kills the quiet-market trades that only ever paid spread.
-3. **Server-side limit TP at the mean.** The natural mean-reversion target (the SMA) is placed as a broker-side TP — limit fills pay no spread on exit and behave identically in tester and live. Each bar the TP is retargeted to the fresh SMA ("gravity"), floored so a fill always still covers the round-trip cost.
-4. **Turn confirmation.** Entry requires the last closed bar to have stopped making progress in the stretch direction (`Close[1]` vs `Close[2]`) — no catching the falling knife the moment Z crosses the threshold.
-5. **Wide, volatility-aware SL.** `max(800 pts, 2.5×ATR)` so intra-bar spikes that OHLC interpolation hides don't become surprise stop-outs under real ticks.
+1. **Once-per-bar decisions on closed-bar data** — entry, exits, breakeven, and TP retargeting run once at each bar open from shift-1 values. Only server-side SL/TP act intra-bar.
+2. **Cost gate** — trade only when StdDev and distance to the mean are clear multiples of full round-trip cost (spread + `InpExtraCostPts`). Defaults: StdDev ≥ 3× cost, TP distance ≥ 4× cost.
+3. **Server-side limit TP at the mean** — SMA as broker TP (limit exit, no spread on fill); retargeted each bar (“gravity”), floored so a fill still covers cost.
+4. **Turn confirmation** — last closed bar must stop extending the stretch (`Close[1]` vs `Close[2]`).
+5. **Wide, volatility-aware SL** — `max(800 pts, 2.5×ATR)` so intra-bar spikes that OHLC hides don’t become surprise stop-outs.
 
-### Entry (evaluated at each M1 bar open)
+### Entry (each M1 bar open)
 
-- Closed-bar Z-Score beyond ±2.2 (`InpEntryZ`)
-- Turn confirmation bar (`InpRequireTurn`)
-- Closed-bar ADX ≤ 22 (ranging market)
-- ATR between 0.4× and 2.0× of its 50-bar average (no spikes, no dead market)
-- Cost gate passes (see above), spread ≤ 50 pts absolute cap
-- Session window 10:00–20:00, no red-folder USD news, loss cooldown elapsed
-- Optional H1 SMA trend alignment (closed H1 bar, no repaint)
+- Closed-bar Z beyond ±2.2 (`InpEntryZ`)
+- Turn confirmation (`InpRequireTurn`)
+- Closed-bar ADX ≤ 22
+- ATR between 0.4× and 2.0× of its 50-bar average
+- Cost gate passes; spread ≤ 50 pts
+- Session 10:00–20:00; no red-folder USD news; loss cooldown elapsed
+- Optional H1 SMA alignment (closed H1, no repaint)
 
 ### Exit priority
 
-1. **Server-side limit TP at the mean** — usually fires first, no spread paid
-2. **Closed-bar Z reversion backup** (`|Z| ≤ 0.2`) — for when the TP was retargeted away
-3. **Time exit** — 40 bars (`InpMaxHoldBars`); a reversion that hasn't happened isn't coming
-4. **Breakeven** — SL moved to entry + costs after 1×ATR in profit
-5. **Server-side SL** — max(800 pts, 2.5×ATR)
+1. Server-side limit TP at the mean  
+2. Closed-bar Z backup (`|Z| ≤ 0.2`)  
+3. Time exit — 40 bars (`InpMaxHoldBars`)  
+4. Breakeven after 1×ATR in profit  
+5. Server-side SL — `max(800 pts, 2.5×ATR)`
 
-Risk tiers, news filter, daily loss limit, Friday/weekend close, and loss cooldown are shared with the other EAs. Magic number: **777555**.
+Shared with the other EAs: risk tiers, news filter, daily loss limit, Friday/weekend close, loss cooldown. Magic **777555**.
 
-### Backtesting notes
+### Backtesting
 
-- Validate on **Every Tick (real ticks preferred)** — that is what this EA is built for. OHLC results should now closely match tick results; if they diverge significantly, something in the setup (spread settings, symbol) is off.
-- If your broker charges commission, set `InpExtraCostPts` to the round-trip commission expressed in gold points (e.g. $7/lot round-trip ≈ 70 pts on a 0.01-lot-per-point-value symbol — check your contract spec).
-- Expect **fewer trades** than the older EAs. The cost gate deliberately skips the marginal trades that made OHLC backtests look busy and profitable but lost money under real ticks.
+- Prefer **Every Tick (real ticks)**. OHLC and tick results should stay close; large divergence usually means spread/symbol setup issues.
+- Set `InpExtraCostPts` to round-trip commission in gold points if the broker charges commission.
+- Expect **fewer trades** than older EAs — the cost gate skips marginal setups that only looked good on OHLC.
 
 ---
 
-## N30 Gold Reversion (`XAU_Quant_Reversion.mq5`)
+## Classic mean reversion (M1 OHLC / EveryTick builds)
 
-Pure mean-reversion scalper. Uses Z-Score deviations from a moving average to identify statistically extreme price levels, then trades the snap-back.
+Pure Z-Score scalper: deviations from an SMA mark extremes; trade the snap-back.
 
 ### Entry
 
-The EA calculates a **Z-Score** — how many standard deviations price is from its SMA. When price is stretched and filters agree, it enters:
+- **Z < -2.4** → BUY  
+- **Z > +2.4** → SELL  
 
-- **Z-Score < -2.4** → BUY (price is abnormally low)
-- **Z-Score > +2.4** → SELL (price is abnormally high)
+| Filter | Typical value | Purpose |
+|--------|---------------|---------|
+| Z-Score | > 2.4 | Statistical extreme |
+| ADX | < 20 | Ranging, not trending |
+| Spread | < 50 pts | Avoid illiquid fills |
+| Volatility | ATR ratio 0.5–2.0× | Skip dead or spike markets |
+| Session | 10:00–20:00 | London + NY overlap |
+| News | No high-impact USD | Avoid red-folder spikes |
 
-**Filters that must pass before entry:**
+### Exit (priority)
 
-| Filter | Value | Purpose |
-|--------|-------|---------|
-| Z-Score | > 2.4 | Price is statistically extreme |
-| ADX | < 20 | Market is ranging, not trending |
-| Spread | < 50 pts | Avoids bad fills during illiquid conditions |
-| Volatility | ATR ratio 0.5–2.0x | Skips abnormally quiet or volatile periods |
-| Session | 10:00–20:00 broker time | London+NY overlap session |
-| News | No red-folder USD events | Avoids high-impact news spikes |
+1. **Z-Score TP** — close near ±0.3  
+2. **Trailing stop** — ATR-based on new bar closes  
+3. **Hard SL** — fixed points, server-side  
+4. **Hard TP** — server-side safety net  
 
-### Exit
+### Dynamic risk tiers
 
-Four possible exits, in priority order:
-
-1. **Z-Score TP** — EA closes when Z-Score reverts to ±0.3 (price returned to mean)
-2. **Trailing stop** — ATR-based trail tightens on new bar closes (2.0× ATR)
-3. **Hard SL** — fixed 800 points, server-side (survives gold spikes and disconnects)
-4. **Hard TP** — fixed 1500 points, server-side safety net
-
-### Dynamic Risk Tiers
-
-Risk automatically scales down as your account grows:
-
-| Equity | Risk/Trade | Daily Loss Limit |
-|--------|-----------|-----------------|
+| Equity | Risk / trade | Daily loss limit |
+|--------|--------------|------------------|
 | < $500 | 10% | 25% |
 | $500 – $2,000 | 7% | 20% |
 | $2,000 – $5,000 | 5% | 15% |
 | $5,000 – $20,000 | 3% | 10% |
 | $20,000+ | 1.5% | 7% |
 
-Lot size is calculated from the SL distance and risk %. On a $50 account this produces 0.01 lots (minimum on XM micro). Dynamic risk can be toggled off via `InpUseDynamicRisk` to use fixed values.
+Lot size from SL distance and risk %. Toggle with `InpUseDynamicRisk` for fixed risk instead.
 
-### News Filter
+### News filter
 
-Uses the MQL5 built-in economic calendar to avoid trading around high-impact USD news events (`CALENDAR_IMPORTANCE_HIGH` — equivalent to Forex Factory red folder news).
+MQL5 economic calendar, **high importance** USD only (Forex Factory–style red folder):
 
-- **60 minutes before** a red-folder event: new entries blocked
-- **60 minutes after** a red-folder event: new entries blocked
-- **Pre-news close**: optionally closes all open trades before red-folder news hits
+- Block new entries 60 minutes before and after  
+- Optional close of open trades before the event  
 
-Note: MQL5's `CALENDAR_IMPORTANCE_MODERATE` does not match Forex Factory's orange folder — it includes CFTC positioning and Baker Hughes rig counts which don't move gold. Only `CALENDAR_IMPORTANCE_HIGH` is filtered.
-
-### Input Parameters
-
-#### Strategy
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpTradeSymbol` | GOLD | Symbol to trade |
-| `InpEntryZ` | 2.4 | Z-Score threshold for entry |
-| `InpADXFilter` | 20 | ADX must be below this (ranging market) |
-| `InpUseDynamicRisk` | true | Enable equity-based risk tiers |
-| `InpRiskPct` | 10.0 | Risk % per trade (when dynamic risk is off) |
-| `InpSLPoints` | 800 | Fixed SL in points |
-| `InpHardTPPoints` | 1500 | Hard TP in points (server-side safety net) |
-| `InpExitZ` | 0.3 | Z-Score exit threshold (close when Z returns near 0) |
-| `InpTrailingATR` | 2.0 | ATR multiplier for trailing stop |
-| `InpMaxPositions` | 1 | Max open positions allowed |
-| `InpStartHour` | 10 | Trading window start (broker time) |
-| `InpEndHour` | 20 | Trading window end (broker time) |
-| `InpMagic` | 777333 | Magic number for position ID |
-
-#### Indicators
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpMAPeriod` | 20 | SMA and StdDev period |
-| `InpATRPeriod` | 14 | ATR period |
-| `InpADXPeriod` | 14 | ADX period |
-
-#### Execution
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpSlippage` | 30 | Max slippage in points |
-| `InpMaxSpreadPts` | 50 | Max spread in points |
-
-#### News Filter
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseNewsFilter` | true | Enable red-folder news filter |
-| `InpNewsMinsBefore` | 60 | Minutes to pause before red-folder news |
-| `InpNewsMinsAfter` | 60 | Minutes to pause after red-folder news |
-| `InpCloseBeforeNews` | true | Close open trades before red-folder news |
-
-#### Volatility Filter
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseVolFilter` | true | Enable volatility-adjusted entry |
-| `InpATRMaxMultiple` | 2.0 | Max ATR vs 50-period avg (skip if exceeded) |
-| `InpATRMinMultiple` | 0.5 | Min ATR vs 50-period avg (skip if too quiet) |
-
-#### Daily Loss Limit
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseDailyLossLimit` | true | Enable daily loss stop |
-| `InpMaxDailyLossPct` | 20.0 | Max daily loss % (when dynamic risk is off) |
+Moderate calendar events are intentionally ignored (too much noise for gold).
 
 ---
 
-## N30 Gold Dual Strategy (`XAU_Quant_Reversion_Breakout.mq5`)
+## Dual strategy (`XAU_Quant_Reversion_Breakout.mq5`)
 
-Runs two independent strategies on the same chart using separate magic numbers. Mean Reversion targets ranging conditions; Trend Breakout targets strong directional moves.
+Two independent strategies on one chart, separate magic numbers.
 
-### Strategies
+| Strategy | Magic | Logic |
+|----------|-------|--------|
+| **Mean reversion** | 777333 | Z-Score when ADX < 20; SL 800 / hard TP 1500 / trail 1.5× ATR |
+| **Trend breakout** | 777444 | Donchian 30 break when ADX > 30; EMA 50 + DI spread ≥ 5; SL 1000 / hard TP 2000 / trail 2.0× ATR; 10-bar loss cooldown |
 
-**Mean Reversion (Magic 777333)**
-- Identical logic to the primary EA: Z-Score entry when ADX < 20
-- SL: 800 pts | Hard TP: 1500 pts | Trailing: 1.5× ATR
-
-**Trend Breakout (Magic 777444)**
-- Entry: price breaks above/below Donchian Channel (30-bar high/low) when ADX > 30
-- Confirmation: price must be above/below EMA 50, DI+/DI- spread ≥ 5.0
-- SL: 1000 pts | Hard TP: 2000 pts | Trailing: 2.0× ATR
-- Cooldown: 10 bars must elapse after a loss before re-entry
-
-Both strategies share the same session window, spread filter, news filter, volatility filter, and daily loss limit.
-
-### Input Parameters
-
-#### Shared Settings
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpTradeSymbol` | GOLD | Symbol to trade |
-| `InpUseDynamicRisk` | true | Enable equity-based risk tiers |
-| `InpRiskPct` | 10.0 | MR risk % per trade (when dynamic risk is off) |
-| `InpTBRiskPct` | 3.0 | TB risk % per trade (when dynamic risk is off) |
-| `InpStartHour` | 10 | Trading window start (broker time) |
-| `InpEndHour` | 20 | Trading window end (broker time) |
-| `InpSlippage` | 30 | Max slippage in points |
-| `InpMaxSpreadPts` | 50 | Max spread in points |
-| `InpMaxMRPositions` | 1 | Max Mean Reversion positions |
-| `InpMaxTBPositions` | 1 | Max Trend Breakout positions |
-
-#### Mean Reversion
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseReversion` | true | Enable Mean Reversion strategy |
-| `InpEntryZ` | 2.4 | Z-Score entry threshold |
-| `InpExitZ` | 0.3 | Z-Score exit threshold |
-| `InpMRAdxFilter` | 20 | ADX below this = ranging |
-| `InpMRSLPoints` | 800 | Fixed SL in points |
-| `InpMRHardTPPoints` | 1500 | Hard TP in points |
-| `InpMRTrailingATR` | 1.5 | ATR multiplier for trailing |
-| `InpMAPeriod` | 20 | MA / StdDev period |
-| `InpMRMagic` | 777333 | Magic number |
-
-#### Trend Breakout
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseBreakout` | true | Enable Trend Breakout strategy |
-| `InpDonchianPeriod` | 30 | Donchian Channel lookback (bars) |
-| `InpTBAdxThreshold` | 30 | ADX above this = trending |
-| `InpTBSLPoints` | 1000 | Fixed SL in points |
-| `InpTBHardTPPoints` | 2000 | Hard TP in points |
-| `InpTBTrailingATR` | 2.0 | ATR multiplier for trailing |
-| `InpEMAPeriod` | 50 | EMA for trend direction confirmation |
-| `InpCooldownBars` | 10 | Bars to wait after a loss before re-entry |
-| `InpMinDISpread` | 5.0 | Min DI+/DI- spread for entry |
-| `InpTBMagic` | 777444 | Magic number |
-
-#### Indicators
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpATRPeriod` | 14 | ATR period |
-| `InpADXPeriod` | 14 | ADX period |
-
-#### News Filter
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseNewsFilter` | true | Enable red-folder news filter |
-| `InpNewsMinsBefore` | 60 | Minutes to pause before red-folder news |
-| `InpNewsMinsAfter` | 60 | Minutes to pause after red-folder news |
-| `InpCloseBeforeNews` | true | Close open trades before red-folder news |
-
-#### Volatility Filter
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseVolFilter` | true | Enable volatility-adjusted entry |
-| `InpATRMaxMultiple` | 2.0 | Max ATR ratio (skip if too wild) |
-| `InpATRMinMultiple` | 0.5 | Min ATR ratio (skip if too quiet) |
-
-#### Daily Loss Limit
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `InpUseDailyLossLimit` | true | Enable daily loss stop |
-| `InpMaxDailyLossPct` | 20.0 | Max daily loss % (when dynamic risk is off) |
+Shared: session, spread, news, volatility filter, daily loss limit.
 
 ---
 
 ## Installation
 
-1. Copy `.mq5` files to your MetaTrader 5 `MQL5/Experts/` folder
-2. Compile in MetaEditor (F7)
-3. Drag onto a **GOLD / XAUUSD M1** chart
-4. Enable **AutoTrading**
+1. Copy the `.mq5` files into `MQL5/Experts/`.
+2. Compile in MetaEditor (`F7`).
+3. Attach to a **GOLD / XAUUSD M1** chart.
+4. Enable **AutoTrading**.
 
-## Chart Display
+## Chart overlay (example)
 
-Real-time status overlay (primary EA):
-
-```
---- N30 GOLD REVERSION v5 ---
+```text
+--- N30 GOLD REVERSION ---
 Equity: $52.30
 Risk: 10.0% | DLL: 25.0%
 Z-Score: -1.45
@@ -276,19 +145,23 @@ Vol Filter: OK
 Daily P/L: +4.60% / -25.0% limit
 ```
 
-## Design Rationale
+## Design notes
 
-- **Fixed-point SL** — ATR-based stops get clipped by gold spikes. Fixed 800-point SL survives volatility.
-- **Z-Score TP** — mean reversion naturally targets Z=0. Closing at ±0.3 captures the snap-back without waiting for an arbitrary pip target.
-- **Hard TP as safety net** — server-side TP protects against VPS disconnects. The Z-Score exit usually triggers first.
-- **Dynamic risk tiers** — aggressive at micro level (10% risk), conservative as capital grows. Prevents giving back gains.
-- **New-bar trailing** — trails only on bar close, not every tick. Reduces broker modify requests and avoids noise-triggered exits.
-- **Dual strategy separation** — separate magic numbers let the two strategies in the Breakout EA open, manage, and close positions independently without interfering.
+- **Fixed-point SL** — ATR stops get clipped by gold spikes; fixed points survive better.
+- **Z / mean TP** — mean reversion targets the average, not an arbitrary pip count.
+- **Hard TP** — server-side backup if the VPS drops.
+- **Dynamic risk** — aggressive on micro equity, tighter as the account grows.
+- **New-bar trailing** — fewer modify requests, less noise-driven exit.
+- **Separate magics** — dual EA strategies manage positions independently.
 
-## Risk Warning
+## Disclaimer
 
-This EA is for **educational and research purposes**. Trading leveraged instruments carries significant risk. 10% risk per trade is aggressive and can blow a small account. Always test on demo first. Past performance does not guarantee future results.
+For educational and research use. Leveraged gold trading can lose the entire account. 10% risk per trade is aggressive. Demo thoroughly before live capital. Past results do not guarantee future performance.
 
 ## License
 
-Copyright 2026, n30dyn4m1c
+This project is licensed under the [MIT License](LICENSE).
+
+## Author
+
+**Neo Malesa** — [n30dyn4m1c](https://github.com/n30dyn4m1c)
